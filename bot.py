@@ -35,7 +35,7 @@ main_kb = ReplyKeyboardMarkup([
 ], resize_keyboard=True)
 
 cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize_keyboard=True)
-gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize新_keyboard=True)
+gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
 
 def date_kb():
     today = datetime.now().strftime("%d.%m – Сьогодні")
@@ -294,3 +294,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         log.info("Зупинено")
+
