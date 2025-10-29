@@ -14,8 +14,8 @@ BOT_TOKEN = "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo"
 ADMIN_ID = 383222956
 SHEET_ID = "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50"
 CAL_ID = "1280758@gmail.com"
-CREDS_S = "ekg-bot-key.json"
-CREDS_C = "calendar-service-key.json"
+CREDS_S = "/etc/secrets/EKG_BOT_KEY"
+CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
 
 # === ЛОГІВАННЯ ===
@@ -292,4 +292,5 @@ if __name__ == "__main__":
     try:
         while True: time.sleep(10)
     except KeyboardInterrupt:
+
         log.info("Зупинено")
