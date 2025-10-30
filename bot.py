@@ -176,9 +176,13 @@ def check_reminders():
 # === TELEGRAM ===
 def send(chat_id, text, reply_markup=None):
     try:
-        requests.post(f"{BASE}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "reply_markup": reply_markup
-        }, timeout=10).raise_for_status()
+        payload = {
+            "chat_id": chat_id,
+            "text": text
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup.to_dict()
+        requests.post(f"{BASE}/sendMessage", json=payload, timeout=10).raise_for_status()
     except Exception as e:
         log.error(f"send error: {e}")
 
@@ -295,6 +299,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         log.info("Зупинено")
+
 
 
 
