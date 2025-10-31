@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + optimized)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + optimized booking)
 import os
 import re
 import logging
@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # === ІМПОРТИ TELEGRAM v21+ ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -39,8 +40,9 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec = {}, {}, set(), {}
-executor = ThreadPoolExecutor(max_workers=2)  # Для паралельної обробки
+u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}  # booked_slots для синхронізації
+executor = ThreadPoolExecutor(max_workers=2)
+lock = threading.Lock()  # Блокування для booked_slots
 
 # === APPLICATION ===
 application = Application.builder().token(BOT_TOKEN).build()
@@ -77,7 +79,7 @@ v_date = lambda x: (
     if datetime.strptime(x.strip(),"%d.%m").replace(year=datetime.now().year).date() >= datetime.now().date() else None
 )
 
-# === КАЛЕНДАР (оптимізований) ===
+# === КАЛЕНДАР (оптимізований з таймаутом) ===
 def get_events_async(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
@@ -86,12 +88,12 @@ def get_events_async(d):
         log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {CREDS_C}")
         return []
     try:
-        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
+        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES), cache_discovery=False)
         start = datetime.combine(d, datetime.min.time()).isoformat() + "Z"
         end = (datetime.combine(d, datetime.max.time()) - timedelta(seconds=1)).isoformat() + "Z"
-        events = service.events().list(calendarId=CAL_ID, timeMin=start, timeMax=end, singleEvents=True).execute().get("items", [])
-        cache[ds] = (events, time.time())
-        return events
+        events = service.events().list(calendarId=CAL_ID, timeMin=start, timeMax=end, singleEvents=True).execute(num_retries=2)
+        cache[ds] = (events.get("items", []), time.time())
+        return cache[ds][0]
     except Exception as e:
         log.error(f"get_events: {e}")
         return []
@@ -104,8 +106,15 @@ def free_60(d, t):
     dt = datetime.combine(d, t).replace(tzinfo=LOCAL)
     start_check = dt - timedelta(minutes=30)
     end_check = dt + timedelta(minutes=30)
-    asyncio.run(get_events(d))  # Оновлюємо кеш перед перевіркою
-    for e in cache.get(d.strftime("%Y-%m-%d"), [{}])[0]:
+    asyncio.run(get_events(d))  # Оновлюємо кеш
+    events = cache.get(d.strftime("%Y-%m-%d"), [{}])[0]
+    with lock:  # Синхронізація з booked_slots
+        for booked_dt in booked_slots.get(d.strftime("%Y-%m-%d"), []):
+            booked_start = booked_dt - timedelta(minutes=30)
+            booked_end = booked_dt + timedelta(minutes=30)
+            if start_check < booked_start < end_check or booked_start < dt < booked_end:
+                return False
+    for e in events:
         try:
             estart = datetime.fromisoformat(e["start"]["dateTime"].replace("Z", "+00:00")).astimezone(LOCAL)
             if start_check < estart < end_check:
@@ -114,13 +123,18 @@ def free_60(d, t):
     return True
 
 async def free_slots_async(d):
-    slots = []
-    cur = datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
-    end = datetime.combine(d, datetime.strptime("18:00","%H:%M").time())
-    while cur <= end:
-        if await asyncio.to_thread(free_60, d, cur.time()):
-            slots.append(cur.strftime("%H:%M"))
-        cur += timedelta(minutes=15)
+    loop = asyncio.get_event_loop()
+    slots = await loop.run_in_executor(executor, lambda: [
+        cur.strftime("%H:%M") for cur in (
+            datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()),
+            *[
+                cur + timedelta(minutes=15) for cur in [
+                    datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
+                    for _ in range(36)
+                ][1:]
+            ]
+        ) if cur <= datetime.combine(d, datetime.strptime("18:00", "%H:%M").time()) and asyncio.run_coroutine_threadsafe(free_60(d, cur.time()), loop).result()
+    ])
     return slots
 
 # === СКАСУВАННЯ ===
@@ -128,7 +142,15 @@ def cancel_record(cid):
     if cid in last_rec and os.path.exists(CREDS_C):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
-            service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
+            event_id = last_rec[cid]["event_id"]
+            dt = datetime.strptime(last_rec[cid]["full_dt"], "%d.%m %H:%M").replace(tzinfo=LOCAL)
+            service.events().delete(calendarId=CAL_ID, eventId=event_id).execute()
+            with lock:
+                ds = dt.date().strftime("%Y-%m-%d")
+                if ds in booked_slots:
+                    booked_slots[ds].remove(dt)
+                    if not booked_slots[ds]:
+                        del booked_slots[ds]
             asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}"))
             last_rec.pop(cid, None)
             return True
@@ -172,6 +194,11 @@ def add_event(data):
             "start": {"dateTime": (dt - timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"},
             "end": {"dateTime": (dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"}
         }).execute()
+        with lock:
+            ds = data["date"].strftime("%Y-%m-%d")
+            if ds not in booked_slots:
+                booked_slots[ds] = []
+            booked_slots[ds].append(dt)
         last_rec[data['cid']] = {"event_id": event["id"], "full_dt": data["full"]}
         return True
     except Exception as e:
@@ -271,7 +298,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if date_val:
             data["date"] = date_val
             data["step"] = "time"
-            slots = await free_slots_async(date_val)  # Асинхронно
+            slots = await free_slots_async(date_val)
             await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
             log.info(f"Крок {chat_id} змінено на time, слоти: {slots}")
         else:
@@ -284,15 +311,16 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.debug(f"Валідація часу: '{text}' → {time_val}")
             if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
                 raise ValueError
-            if await asyncio.to_thread(free_60, data["date"], time_val):  # Асинхронна перевірка
+            dt = datetime.combine(data["date"], time_val).replace(tzinfo=LOCAL)
+            if await asyncio.to_thread(free_60, data["date"], time_val):
                 full = f"{data['date'].strftime('%d.%m')} {text}"
                 conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
                 await msg.reply_text(f"{conf}\n\nДякую за запис!", reply_markup=main_kb)
                 await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
-                add_event({**data, "time": time_val, "cid": chat_id, "full": full})
-                add_sheet({**data, "full": full})
-                u.pop(chat_id, None)
-                log.info(f"Запис завершено для {chat_id}")
+                if add_event({**data, "time": time_val, "cid": chat_id, "full": full}):
+                    add_sheet({**data, "full": full})
+                    u.pop(chat_id, None)
+                    log.info(f"Запис завершено для {chat_id}")
             else:
                 await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
                 log.warning(f"Час зайнято для {chat_id}")
