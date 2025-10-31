@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-python-telegram-bot==20.8
+python-telegram-bot==21.5
 google-api-python-client
 google-auth
 python-dateutil
