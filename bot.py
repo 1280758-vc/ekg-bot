@@ -1,9 +1,8 @@
-# bot.py — WEBHOOK + FASTAPI + Render (ВИПРАВЛЕНО sendMessage)
+# bot.py — АСИНХРОННИЙ WEBHOOK + FastAPI + Render
 import os
 import re
 import logging
 import time
-import requests
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
@@ -12,10 +11,11 @@ from dateutil import tz
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
+import asyncio
 
 # === ІМПОРТИ TELEGRAM ===
-from telegram import ReplyKeyboardMarkup, KeyboardButton
-from telegram import Bot  # ДОДАНО!
+from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
+from telegram.ext import Application, ContextTypes
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -27,9 +27,6 @@ CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
-# === TELEGRAM BOT ===
-bot = Bot(token=BOT_TOKEN)  # ДОДАНО!
-
 # === ЛОГІВАННЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
@@ -40,6 +37,9 @@ app = FastAPI()
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
+
+# === APPLICATION ===
+application = Application.builder().token(BOT_TOKEN).build()
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
@@ -120,7 +120,7 @@ def cancel_record(cid):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
-            send(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}")
+            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}"))
             last_rec.pop(cid, None)
             return True
         except Exception as e:
@@ -167,11 +167,11 @@ def add_event(data):
         return True
     except Exception as e:
         log.error(f"add_event: {e}")
-        send(ADMIN_ID, f"ПОМИЛКА КАЛЕНДАРЯ: {e}")
+        asyncio.create_task(application.bot.send_message(ADMIN_ID, f"ПОМИЛКА КАЛЕНДАРЯ: {e}"))
         return False
 
 # === НАГАДУВАННЯ ===
-def check_reminders():
+async def check_reminders():
     now = datetime.now(LOCAL)
     for day in [now.date(), (now + timedelta(days=1)).date()]:
         for e in get_events(day):
@@ -185,45 +185,34 @@ def check_reminders():
                     cid_match = re.search(r"Chat ID: (\d+)", desc)
                     cid = int(cid_match.group(1)) if cid_match else None
                     msg = f"НАГАДУВАННЯ!\nЕКГ через {mins_left} хв\n{e['summary']}\nЧас: {start_dt.strftime('%H:%M')}"
-                    if cid: send(cid, msg)
-                    send(ADMIN_ID, f"НАГАДУВАННЯ:\n{msg}")
+                    if cid: await application.bot.send_message(cid, msg)
+                    await application.bot.send_message(ADMIN_ID, f"НАГАДУВАННЯ:\n{msg}")
                     reminded.add((eid, mins_left))
             except: continue
 
-# === TELEGRAM (ВИПРАВЛЕНО) ===
-def send(chat_id, text, reply_markup=None):
-    try:
-        bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        log.error(f"send error: {e}")
-
 # === ОБРОБКА ===
-def process(update: dict):
+async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global u
-    msg = update.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
-    text = msg.get("text", "").strip()
-    if not chat_id: return
+    msg = update.message
+    if not msg: return
+    chat_id = msg.chat_id
+    text = msg.text.strip() if msg.text else ""
 
     if text == "Скасувати":
         u.pop(chat_id, None)
-        send(chat_id, "Скасовано.", main_kb)
+        await msg.reply_text("Скасовано.", reply_markup=main_kb)
         return
 
     if text == "Скасувати запис":
         if cancel_record(chat_id):
-            send(chat_id, "Запис скасовано!", main_kb)
+            await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
         else:
-            send(chat_id, "Запис не знайдено", main_kb)
+            await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
         return
 
     if text in ["/start", "Записатися на ЕКГ"]:
         u[chat_id] = {"step": "pib", "cid": chat_id}
-        send(chat_id, "ПІБ (Прізвище Ім'я По батькові):", cancel_kb)
+        await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         return
 
     if chat_id not in u: return
@@ -244,14 +233,14 @@ def process(update: dict):
         if val is not None:
             data[step] = val
             data["step"] = steps[step][1]
-            send(chat_id, steps[step][2], steps[step][3])
+            await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
         else:
             if step == "email" and (text == "" or text == "Скасувати"):
                 data[step] = ""
                 data["step"] = "addr"
-                send(chat_id, "Адреса:", cancel_kb)
+                await msg.reply_text("Адреса:", reply_markup=cancel_kb)
             else:
-                send(chat_id, "Невірно", cancel_kb)
+                await msg.reply_text("Невірно", reply_markup=cancel_kb)
         return
 
     if step == "date":
@@ -260,9 +249,9 @@ def process(update: dict):
             data["date"] = date_val
             data["step"] = "time"
             slots = free_slots(date_val)
-            send(chat_id, f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", cancel_kb)
+            await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
         else:
-            send(chat_id, "Невірна дата", date_kb())
+            await msg.reply_text("Невірна дата", reply_markup=date_kb())
 
     if step == "time":
         try:
@@ -272,46 +261,49 @@ def process(update: dict):
             if free_60(data["date"], time_val):
                 full = f"{data['date'].strftime('%d.%m')} {text}"
                 conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
-                send(chat_id, f"{conf}\n\nДякую за запис!", main_kb)
-                send(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
+                await msg.reply_text(f"{conf}\n\nДякую за запис!", reply_markup=main_kb)
+                await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
                 add_event({**data, "time": time_val, "cid": chat_id, "full": full})
                 add_sheet({**data, "full": full})
                 u.pop(chat_id, None)
             else:
-                send(chat_id, "Зайнято (±30 хв)", cancel_kb)
+                await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
         except:
-            send(chat_id, "Формат: ЧЧ:ХХ", cancel_kb)
+            await msg.reply_text("Формат: ЧЧ:ХХ", reply_markup=cancel_kb)
 
 # === WEBHOOK ===
 @app.post(WEBHOOK_PATH)
-async def webhook_post(request: Request):
-    update = await request.json()
-    Thread(target=process, args=(update,)).start()
+async def webhook(request: Request):
+    update = Update.de_json(await request.json(), application.bot)
+    asyncio.create_task(process_update(update, None))
     return JSONResponse({"ok": True})
 
 @app.get(WEBHOOK_PATH)
 async def webhook_get():
     return JSONResponse({"ok": True, "message": "Webhook active"})
 
-# === НАЛАШТУВАННЯ WEBHOOK ===
-def set_webhook():
-    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", params={"url": url}, timeout=10)
-        if r.json().get("ok"):
-            log.info(f"Webhook встановлено: {url}")
-        else:
-            log.error(f"Webhook помилка: {r.text}")
-    except Exception as e:
-        log.error(f"set_webhook: {e}")
+# === НАГАДУВАННЯ В ФОНІ ===
+async def reminder_loop():
+    while True:
+        await check_reminders()
+        await asyncio.sleep(60)
 
 # === ЗАПУСК ===
 @app.on_event("startup")
 async def startup():
     log.info("Бот запущено!")
     init_sheet()
-    set_webhook()
-    Thread(target=lambda: [check_reminders() or time.sleep(60) for _ in iter(int, 1)], daemon=True).start()
+    await application.initialize()
+    await application.start()
+    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    await application.bot.set_webhook(url=url)
+    log.info(f"Webhook встановлено: {url}")
+    asyncio.create_task(reminder_loop())
+
+@app.on_event("shutdown")
+async def shutdown():
+    await application.stop()
+    await application.shutdown()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
