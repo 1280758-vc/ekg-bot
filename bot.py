@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v20.8 + Python 3.12)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5)
 import os
 import re
 import logging
@@ -12,9 +12,9 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import asyncio
 
-# === ІМПОРТИ TELEGRAM ===
+# === ІМПОРТИ TELEGRAM v21+ ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
-from telegram.ext import ApplicationBuilder, ContextTypes
+from telegram.ext import Application, ContextTypes
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -38,7 +38,7 @@ LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
 
 # === APPLICATION ===
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+application = Application.builder().token(BOT_TOKEN).build()
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
@@ -63,7 +63,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0.9._%+-]+@[a-zA-Z0.9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -278,9 +278,9 @@ async def webhook(request: Request):
     asyncio.create_task(process_update(update, None))
     return JSONResponse({"ok": True})
 
-@app.get(WEBHOOK_PATH)
-async def webhook_get():
-    return JSONResponse({"ok": True, "message": "Webhook active"})
+@app.get("/")
+async def root():
+    return {"message": "EKG Bot is running!"}
 
 # === НАГАДУВАННЯ В ФОНІ ===
 async def reminder_loop():
