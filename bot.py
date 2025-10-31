@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v20.8)
+# bot.py — WEBHOOK + FastAPI + Render (v20.8 з GitHub)
 import os
 import re
 import logging
@@ -64,7 +64,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0.9._%+-]+@[a-zA-Z0.9.-]+\.[a-zA-Z]{2,}$", x) else ""
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
