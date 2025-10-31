@@ -1,10 +1,9 @@
-# bot.py — WEBHOOK + FastAPI + Render (v20.8 з GitHub)
+# bot.py — WEBHOOK + FastAPI + Render (v20.8 + Python 3.12)
 import os
 import re
 import logging
 import time
 from datetime import datetime, timedelta
-from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
@@ -18,10 +17,10 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import ApplicationBuilder, ContextTypes
 
 # === НАЛАШТУВАННЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 383222956))
-SHEET_ID = os.getenv("SHEET_ID", "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50")
-CAL_ID = os.getenv("CAL_ID", "7ec1726c6d95fb250972347b9818607d46dcea51150454898251aa4435298a7e@group.calendar.google.com")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+SHEET_ID = os.getenv("SHEET_ID")
+CAL_ID = os.getenv("CAL_ID")
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
