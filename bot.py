@@ -1,16 +1,15 @@
-# bot.py — WEBHOOK-ВЕРСІЯ: ШВИДКА, ЕКОНОМНА
+# bot.py — ВИПРАВЛЕНО: requests + захист від відсутніх ключів
 import os
 import re
 import logging
 import time
+import requests  # ДОДАНО
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
-from fastapi import FastAPI, Request
+from telegram import ReplyKeyboardMarkup, KeyboardButton
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -20,7 +19,7 @@ CAL_ID = os.getenv("CAL_ID", "1280758@gmail.com")
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
-WEBHOOK_SECRET = "my_secret_token"  # Будь-який секрет для безпеки
+BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # === ЛОГІВАННЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,6 +28,13 @@ log = logging.getLogger(__name__)
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
+
+# === ЗАХИСТ: Перевірка наявності ключів ===
+def check_key(path, name):
+    if not os.path.exists(path):
+        log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {path} — завантаж у Render → Secret Files → {name}")
+        return False
+    return True
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
@@ -53,7 +59,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0.9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -64,6 +70,7 @@ v_date = lambda x: (
 
 # === КАЛЕНДАР ===
 def get_events(d):
+    if not check_key(CREDS_C, "CALENDAR_SERVICE_KEY"): return []
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
         return cache[ds][0]
@@ -102,7 +109,7 @@ def free_slots(d):
 
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
-    if cid in last_rec:
+    if cid in last_rec and check_key(CREDS_C, "CALENDAR_SERVICE_KEY"):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
@@ -115,6 +122,7 @@ def cancel_record(cid):
 
 # === ЗАПИС ===
 def init_sheet():
+    if not check_key(CREDS_S, "EKG_BOT_KEY"): return
     try:
         service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
         values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
@@ -127,6 +135,7 @@ def init_sheet():
         log.error(f"init_sheet: {e}")
 
 def add_sheet(data):
+    if not check_key(CREDS_S, "EKG_BOT_KEY"): return
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
@@ -136,6 +145,7 @@ def add_sheet(data):
         log.error(f"add_sheet: {e}")
 
 def add_event(data):
+    if not check_key(CREDS_C, "CALENDAR_SERVICE_KEY"): return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
         service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
@@ -200,19 +210,19 @@ def process(update):
 
     if text == "Скасувати":
         u.pop(chat_id, None)
-        send(chat_id, "Скасовано.", main)
+        send(chat_id, "Скасовано.", main_kb)
         return
 
     if text == "Скасувати запис":
         if cancel_record(chat_id):
-            send(chat_id, "Запис скасовано!", main)
+            send(chat_id, "Запис скасовано!", main_kb)
         else:
-            send(chat_id, "Запис не знайдено")
+            send(chat_id, "Запис не знайдено", main_kb)
         return
 
     if text in ["/start", "Записатися на ЕКГ"]:
         u[chat_id] = {"step": "pib", "cid": chat_id}
-        send(chat_id, "ПІБ (Прізвище Ім'я По батькові):", cancel)
+        send(chat_id, "ПІБ (Прізвище Ім'я По батькові):", cancel_kb)
         return
 
     if chat_id not in u: return
@@ -220,12 +230,12 @@ def process(update):
     step = data["step"]
 
     steps = {
-        "pib": (v_pib, "gender", "Стать:", gender),
-        "gender": (v_gender, "year", "Рік народження:", cancel),
-        "year": (v_year, "phone", "Телефон:", cancel),
-        "phone": (v_phone, "email", "Email (можна пропустити):", cancel),
-        "email": (v_email, "addr", "Адреса:", cancel),
-        "addr": (lambda x: x.strip(), "date", "Дата:", date_k())
+        "pib": (v_pib, "gender", "Стать:", gender_kb),
+        "gender": (v_gender, "year", "Рік народження:", cancel_kb),
+        "year": (v_year, "phone", "Телефон:", cancel_kb),
+        "phone": (v_phone, "email", "Email (можна пропустити):", cancel_kb),
+        "email": (v_email, "addr", "Адреса:", cancel_kb),
+        "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
     }
 
     if step in steps:
@@ -238,9 +248,9 @@ def process(update):
             if step == "email" and (text == "" or text == "Скасувати"):
                 data[step] = ""
                 data["step"] = "addr"
-                send(chat_id, "Адреса:", cancel)
+                send(chat_id, "Адреса:", cancel_kb)
             else:
-                send(chat_id, "Невірно", cancel)
+                send(chat_id, "Невірно", cancel_kb)
         return
 
     if step == "date":
@@ -249,22 +259,27 @@ def process(update):
             data["date"] = date_val
             data["step"] = "time"
             slots = free_slots(date_val)
-            send(chat_id, f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", cancel)
+            send(chat_id, f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", cancel_kb)
         else:
-            send(chat_id, "Невірна дата", date_k())
+            send(chat_id, "Невірна дата", date_kb())
 
     if step == "time":
-        time_val, err = v_time(text, data["date"])
-        if time_val:
-            full = f"{data['date'].strftime('%d.%m')} {text}"
-            conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
-            send(chat_id, f"{conf}\n\nДякую за запис!", main)
-            send(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
-            add_event({**data, "time": time_val, "cid": chat_id, "full": full})
-            add_sheet({**data, "full": full})
-            u.pop(chat_id, None)
-        else:
-            send(chat_id, err, cancel)
+        try:
+            time_val = datetime.strptime(text.strip(), "%H:%M").time()
+            if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
+                raise ValueError
+            if free_60(data["date"], time_val):
+                full = f"{data['date'].strftime('%d.%m')} {text}"
+                conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
+                send(chat_id, f"{conf}\n\nДякую за запис!", main_kb)
+                send(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
+                add_event({**data, "time": time_val, "cid": chat_id, "full": full})
+                add_sheet({**data, "full": full})
+                u.pop(chat_id, None)
+            else:
+                send(chat_id, "Зайнято (±30 хв)", cancel_kb)
+        except:
+            send(chat_id, "Формат: ЧЧ:ХХ", cancel_kb)
 
 # === ПОЛІНГ ===
 def polling():
