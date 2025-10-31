@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ekg-bot
+    env: python
+    pythonVersion: "3.12"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      BOT_TOKEN: "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo"
+      ADMIN_ID: "383222956"
+      SHEET_ID: "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50"
+      CAL_ID: "7ec1726c6d95fb250972347b9818607d46dcea51150454898251aa4435298a7e@group.calendar.google.com"
