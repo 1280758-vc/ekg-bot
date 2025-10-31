@@ -1,4 +1,4 @@
-# bot.py — АСИНХРОННИЙ WEBHOOK + FastAPI + Render
+# bot.py — WEBHOOK + FastAPI + Render (v20.8)
 import os
 import re
 import logging
@@ -15,7 +15,7 @@ import asyncio
 
 # === ІМПОРТИ TELEGRAM ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
-from telegram.ext import Application, ContextTypes
+from telegram.ext import ApplicationBuilder, ContextTypes
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -39,7 +39,7 @@ LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
 
 # === APPLICATION ===
-application = Application.builder().token(BOT_TOKEN).build()
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
@@ -274,7 +274,8 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === WEBHOOK ===
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
-    update = Update.de_json(await request.json(), application.bot)
+    json_data = await request.json()
+    update = Update.de_json(json_data, application.bot)
     asyncio.create_task(process_update(update, None))
     return JSONResponse({"ok": True})
 
