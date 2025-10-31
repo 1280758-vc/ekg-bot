@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + debug)
 import os
 import re
 import logging
@@ -196,13 +196,17 @@ async def check_reminders():
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global u
     msg = update.message
-    if not msg: return
+    if not msg:
+        log.warning(f"Отримано оновлення без повідомлення: {update}")
+        return
     chat_id = msg.chat_id
     text = msg.text.strip() if msg.text else ""
+    log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
     if text == "Скасувати":
         u.pop(chat_id, None)
         await msg.reply_text("Скасовано.", reply_markup=main_kb)
+        log.info(f"Користувач {chat_id} скасував")
         return
 
     if text == "Скасувати запис":
@@ -210,16 +214,21 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
         else:
             await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
+        log.info(f"Скасування запису для {chat_id}")
         return
 
     if text in ["/start", "Записатися на ЕКГ"]:
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
+        log.info(f"Користувач {chat_id} почав запис")
         return
 
-    if chat_id not in u: return
+    if chat_id not in u:
+        log.warning(f"Невідомий чат {chat_id} відправив: '{text}'")
+        return
     data = u[chat_id]
     step = data["step"]
+    log.info(f"Крок для {chat_id}: {step}, введено: '{text}'")
 
     steps = {
         "pib": (v_pib, "gender", "Стать:", gender_kb),
@@ -232,32 +241,40 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step in steps:
         val = steps[step][0](text)
+        log.debug(f"Валідація {step}: '{text}' → {val}")
         if val is not None:
             data[step] = val
             data["step"] = steps[step][1]
             await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
+            log.info(f"Крок {chat_id} змінено на {steps[step][1]}")
         else:
             if step == "email" and (text == "" or text == "Скасувати"):
                 data[step] = ""
                 data["step"] = "addr"
                 await msg.reply_text("Адреса:", reply_markup=cancel_kb)
+                log.info(f"Пропущено email для {chat_id}")
             else:
                 await msg.reply_text("Невірно", reply_markup=cancel_kb)
+                log.warning(f"Невірний ввід для {chat_id} на кроці {step}")
         return
 
     if step == "date":
         date_val = v_date(text)
+        log.debug(f"Валідація дати: '{text}' → {date_val}")
         if date_val:
             data["date"] = date_val
             data["step"] = "time"
             slots = free_slots(date_val)
             await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
+            log.info(f"Крок {chat_id} змінено на time")
         else:
             await msg.reply_text("Невірна дата", reply_markup=date_kb())
+            log.warning(f"Невірна дата від {chat_id}")
 
     if step == "time":
         try:
             time_val = datetime.strptime(text.strip(), "%H:%M").time()
+            log.debug(f"Валідація часу: '{text}' → {time_val}")
             if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
                 raise ValueError
             if free_60(data["date"], time_val):
@@ -268,16 +285,20 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_event({**data, "time": time_val, "cid": chat_id, "full": full})
                 add_sheet({**data, "full": full})
                 u.pop(chat_id, None)
+                log.info(f"Запис завершено для {chat_id}")
             else:
                 await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
-        except:
+                log.warning(f"Час зайнято для {chat_id}")
+        except Exception as e:
             await msg.reply_text("Формат: ЧЧ:ХХ", reply_markup=cancel_kb)
+            log.error(f"Помилка обробки часу для {chat_id}: {e}")
 
 # === WEBHOOK ===
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
     json_data = await request.json()
     update = Update.de_json(json_data, application.bot)
+    log.info(f"Отримано webhook: {update}")
     asyncio.create_task(process_update(update, None))
     return JSONResponse({"ok": True})
 
@@ -308,7 +329,7 @@ async def shutdown_event():
     await application.stop()
     await application.shutdown()
 
-# === HEALTH CHECK (для Render авто-рестарту) ===
+# === HEALTH CHECK ===
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
