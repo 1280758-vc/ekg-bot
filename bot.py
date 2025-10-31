@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + debug)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + optimized)
 import os
 import re
 import logging
@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # === ІМПОРТИ TELEGRAM v21+ ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -39,6 +40,7 @@ app = FastAPI()
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
+executor = ThreadPoolExecutor(max_workers=2)  # Для паралельної обробки
 
 # === APPLICATION ===
 application = Application.builder().token(BOT_TOKEN).build()
@@ -75,8 +77,8 @@ v_date = lambda x: (
     if datetime.strptime(x.strip(),"%d.%m").replace(year=datetime.now().year).date() >= datetime.now().date() else None
 )
 
-# === КАЛЕНДАР ===
-def get_events(d):
+# === КАЛЕНДАР (оптимізований) ===
+def get_events_async(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
         return cache[ds][0]
@@ -94,11 +96,16 @@ def get_events(d):
         log.error(f"get_events: {e}")
         return []
 
+async def get_events(d):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, get_events_async, d)
+
 def free_60(d, t):
     dt = datetime.combine(d, t).replace(tzinfo=LOCAL)
     start_check = dt - timedelta(minutes=30)
     end_check = dt + timedelta(minutes=30)
-    for e in get_events(d):
+    asyncio.run(get_events(d))  # Оновлюємо кеш перед перевіркою
+    for e in cache.get(d.strftime("%Y-%m-%d"), [{}])[0]:
         try:
             estart = datetime.fromisoformat(e["start"]["dateTime"].replace("Z", "+00:00")).astimezone(LOCAL)
             if start_check < estart < end_check:
@@ -106,12 +113,12 @@ def free_60(d, t):
         except: continue
     return True
 
-def free_slots(d):
+async def free_slots_async(d):
     slots = []
     cur = datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
     end = datetime.combine(d, datetime.strptime("18:00","%H:%M").time())
     while cur <= end:
-        if free_60(d, cur.time()):
+        if await asyncio.to_thread(free_60, d, cur.time()):
             slots.append(cur.strftime("%H:%M"))
         cur += timedelta(minutes=15)
     return slots
@@ -176,7 +183,7 @@ def add_event(data):
 async def check_reminders():
     now = datetime.now(LOCAL)
     for day in [now.date(), (now + timedelta(days=1)).date()]:
-        for e in get_events(day):
+        for e in await get_events(day):
             try:
                 start_str = e["start"]["dateTime"]
                 start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")).astimezone(LOCAL)
@@ -264,9 +271,9 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if date_val:
             data["date"] = date_val
             data["step"] = "time"
-            slots = free_slots(date_val)
+            slots = await free_slots_async(date_val)  # Асинхронно
             await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
-            log.info(f"Крок {chat_id} змінено на time")
+            log.info(f"Крок {chat_id} змінено на time, слоти: {slots}")
         else:
             await msg.reply_text("Невірна дата", reply_markup=date_kb())
             log.warning(f"Невірна дата від {chat_id}")
@@ -277,7 +284,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.debug(f"Валідація часу: '{text}' → {time_val}")
             if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
                 raise ValueError
-            if free_60(data["date"], time_val):
+            if await asyncio.to_thread(free_60, data["date"], time_val):  # Асинхронна перевірка
                 full = f"{data['date'].strftime('%d.%m')} {text}"
                 conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
                 await msg.reply_text(f"{conf}\n\nДякую за запис!", reply_markup=main_kb)
