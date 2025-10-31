@@ -1,19 +1,20 @@
-# bot.py — WEBHOOK + FASTAPI (для Render)
+# bot.py — WEBHOOK + FASTAPI + Render (ПОВНІСТЮ ВИПРАВЛЕНО)
 import os
 import re
 import logging
 import time
+import requests
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
-import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
+# === ІМПОРТИ TELEGRAM ===
+from telegram import ReplyKeyboardMarkup, KeyboardButton  # ДОДАНО!
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -23,6 +24,7 @@ CAL_ID = os.getenv("CAL_ID", "7ec1726c6d95fb250972347b9818607d46dcea511504548982
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # === ЛОГІВАННЯ ===
@@ -59,7 +61,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0.9._%+-]+@[a-zA-Z0.9.-]+\.[a-zA-Z]{2,}$", x) else ""
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -73,6 +75,9 @@ def get_events(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
         return cache[ds][0]
+    if not os.path.exists(CREDS_C):
+        log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {CREDS_C}")
+        return []
     try:
         service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
         start = datetime.combine(d, datetime.min.time()).isoformat() + "Z"
@@ -108,7 +113,7 @@ def free_slots(d):
 
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
-    if cid in last_rec:
+    if cid in last_rec and os.path.exists(CREDS_C):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
@@ -121,6 +126,7 @@ def cancel_record(cid):
 
 # === ЗАПИС ===
 def init_sheet():
+    if not os.path.exists(CREDS_S): return
     try:
         service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
         values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
@@ -133,6 +139,7 @@ def init_sheet():
         log.error(f"init_sheet: {e}")
 
 def add_sheet(data):
+    if not os.path.exists(CREDS_S): return
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
@@ -142,6 +149,7 @@ def add_sheet(data):
         log.error(f"add_sheet: {e}")
 
 def add_event(data):
+    if not os.path.exists(CREDS_C): return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
         service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
@@ -188,16 +196,8 @@ def send(chat_id, text, reply_markup=None):
     except Exception as e:
         log.error(f"send error: {e}")
 
-def get_updates(offset):
-    try:
-        r = requests.get(f"{BASE}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35).json()
-        return r.get("result", [])
-    except Exception as e:
-        log.error(f"get_updates: {e}")
-        return []
-
 # === ОБРОБКА ===
-def process(update):
+def process(update: dict):
     global u
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
@@ -305,5 +305,4 @@ async def startup():
     Thread(target=lambda: [check_reminders() or time.sleep(60) for _ in iter(int, 1)], daemon=True).start()
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
