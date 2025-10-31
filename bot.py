@@ -1,8 +1,7 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan)
 import os
 import re
 import logging
-import time
 from datetime import datetime, timedelta
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -27,7 +26,11 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
 # === ЛОГІВАННЯ ===
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    filename="bot.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 log = logging.getLogger(__name__)
 
 # === FastAPI ===
@@ -288,9 +291,9 @@ async def reminder_loop():
         await check_reminders()
         await asyncio.sleep(60)
 
-# === ЗАПУСК ===
+# === LIFESPAN EVENTS ===
 @app.on_event("startup")
-async def startup():
+async def startup_event():
     log.info("Бот запущено!")
     init_sheet()
     await application.initialize()
@@ -301,9 +304,14 @@ async def startup():
     asyncio.create_task(reminder_loop())
 
 @app.on_event("shutdown")
-async def shutdown():
+async def shutdown_event():
     await application.stop()
     await application.shutdown()
+
+# === HEALTH CHECK (для Render авто-рестарту) ===
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=10000)
