@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FASTAPI + Render (ПОВНИЙ КОД)
+# bot.py — WEBHOOK + FASTAPI + Render (ВИПРАВЛЕНО sendMessage)
 import os
 import re
 import logging
@@ -15,6 +15,7 @@ import uvicorn
 
 # === ІМПОРТИ TELEGRAM ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton
+from telegram import Bot  # ДОДАНО!
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -25,7 +26,9 @@ CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# === TELEGRAM BOT ===
+bot = Bot(token=BOT_TOKEN)  # ДОДАНО!
 
 # === ЛОГІВАННЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -187,12 +190,14 @@ def check_reminders():
                     reminded.add((eid, mins_left))
             except: continue
 
-# === TELEGRAM ===
+# === TELEGRAM (ВИПРАВЛЕНО) ===
 def send(chat_id, text, reply_markup=None):
     try:
-        requests.post(f"{BASE}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "reply_markup": reply_markup
-        }, timeout=10).raise_for_status()
+        bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup
+        )
     except Exception as e:
         log.error(f"send error: {e}")
 
@@ -292,7 +297,7 @@ async def webhook_get():
 def set_webhook():
     url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     try:
-        r = requests.get(f"{BASE}/setWebhook", params={"url": url}, timeout=10)
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", params={"url": url}, timeout=10)
         if r.json().get("ok"):
             log.info(f"Webhook встановлено: {url}")
         else:
