@@ -1,17 +1,19 @@
-# bot.py — WEBHOOK + BACKGROUND WORKER (Render)
+# bot.py — WEBHOOK + FASTAPI (для Render)
 import os
 import re
 import logging
 import time
-import requests
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+import uvicorn
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
@@ -21,24 +23,24 @@ CAL_ID = os.getenv("CAL_ID", "7ec1726c6d95fb250972347b9818607d46dcea511504548982
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # === ЛОГІВАННЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
+# === FastAPI ===
+app = FastAPI()
+
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
-
-# === FastAPI ===
-app = FastAPI()
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
     [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")]
 ], resize_keyboard=True)
+
 cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize_keyboard=True)
 gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
 
@@ -71,9 +73,6 @@ def get_events(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
         return cache[ds][0]
-    if not os.path.exists(CREDS_C):
-        log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {CREDS_C}")
-        return []
     try:
         service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
         start = datetime.combine(d, datetime.min.time()).isoformat() + "Z"
@@ -109,7 +108,7 @@ def free_slots(d):
 
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
-    if cid in last_rec and os.path.exists(CREDS_C):
+    if cid in last_rec:
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
@@ -122,7 +121,6 @@ def cancel_record(cid):
 
 # === ЗАПИС ===
 def init_sheet():
-    if not os.path.exists(CREDS_S): return
     try:
         service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
         values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
@@ -135,7 +133,6 @@ def init_sheet():
         log.error(f"init_sheet: {e}")
 
 def add_sheet(data):
-    if not os.path.exists(CREDS_S): return
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
@@ -145,7 +142,6 @@ def add_sheet(data):
         log.error(f"add_sheet: {e}")
 
 def add_event(data):
-    if not os.path.exists(CREDS_C): return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
         service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
@@ -192,8 +188,16 @@ def send(chat_id, text, reply_markup=None):
     except Exception as e:
         log.error(f"send error: {e}")
 
+def get_updates(offset):
+    try:
+        r = requests.get(f"{BASE}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35).json()
+        return r.get("result", [])
+    except Exception as e:
+        log.error(f"get_updates: {e}")
+        return []
+
 # === ОБРОБКА ===
-def process(update: dict):
+def process(update):
     global u
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
