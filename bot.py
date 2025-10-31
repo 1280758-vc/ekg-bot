@@ -1,24 +1,27 @@
-# bot.py — ВИПРАВЛЕНО: requests + захист від відсутніх ключів
+# bot.py — WEBHOOK + BACKGROUND WORKER (Render)
 import os
 import re
 import logging
 import time
-import requests  # ДОДАНО
+import requests
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
-from telegram import ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 # === НАЛАШТУВАННЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 383222956))
 SHEET_ID = os.getenv("SHEET_ID", "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50")
-CAL_ID = os.getenv("CAL_ID", "1280758@gmail.com")
+CAL_ID = os.getenv("CAL_ID", "7ec1726c6d95fb250972347b9818607d46dcea51150454898251aa4435298a7e@group.calendar.google.com")
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # === ЛОГІВАННЯ ===
@@ -29,18 +32,13 @@ log = logging.getLogger(__name__)
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
 
-# === ЗАХИСТ: Перевірка наявності ключів ===
-def check_key(path, name):
-    if not os.path.exists(path):
-        log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {path} — завантаж у Render → Secret Files → {name}")
-        return False
-    return True
+# === FastAPI ===
+app = FastAPI()
 
 # === КЛАВІАТУРИ ===
 main_kb = ReplyKeyboardMarkup([
     [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")]
 ], resize_keyboard=True)
-
 cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize_keyboard=True)
 gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
 
@@ -59,7 +57,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0.9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -70,10 +68,12 @@ v_date = lambda x: (
 
 # === КАЛЕНДАР ===
 def get_events(d):
-    if not check_key(CREDS_C, "CALENDAR_SERVICE_KEY"): return []
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
         return cache[ds][0]
+    if not os.path.exists(CREDS_C):
+        log.error(f"КЛЮЧ НЕ ЗНАЙДЕНО: {CREDS_C}")
+        return []
     try:
         service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
         start = datetime.combine(d, datetime.min.time()).isoformat() + "Z"
@@ -109,7 +109,7 @@ def free_slots(d):
 
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
-    if cid in last_rec and check_key(CREDS_C, "CALENDAR_SERVICE_KEY"):
+    if cid in last_rec and os.path.exists(CREDS_C):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             service.events().delete(calendarId=CAL_ID, eventId=last_rec[cid]["event_id"]).execute()
@@ -122,7 +122,7 @@ def cancel_record(cid):
 
 # === ЗАПИС ===
 def init_sheet():
-    if not check_key(CREDS_S, "EKG_BOT_KEY"): return
+    if not os.path.exists(CREDS_S): return
     try:
         service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
         values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
@@ -135,7 +135,7 @@ def init_sheet():
         log.error(f"init_sheet: {e}")
 
 def add_sheet(data):
-    if not check_key(CREDS_S, "EKG_BOT_KEY"): return
+    if not os.path.exists(CREDS_S): return
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
@@ -145,7 +145,7 @@ def add_sheet(data):
         log.error(f"add_sheet: {e}")
 
 def add_event(data):
-    if not check_key(CREDS_C, "CALENDAR_SERVICE_KEY"): return False
+    if not os.path.exists(CREDS_C): return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
         service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
@@ -192,16 +192,8 @@ def send(chat_id, text, reply_markup=None):
     except Exception as e:
         log.error(f"send error: {e}")
 
-def get_updates(offset):
-    try:
-        r = requests.get(f"{BASE}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35).json()
-        return r.get("result", [])
-    except Exception as e:
-        log.error(f"get_updates: {e}")
-        return []
-
 # === ОБРОБКА ===
-def process(update):
+def process(update: dict):
     global u
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
@@ -281,26 +273,33 @@ def process(update):
         except:
             send(chat_id, "Формат: ЧЧ:ХХ", cancel_kb)
 
-# === ПОЛІНГ ===
-def polling():
-    offset = 0
-    while True:
-        try:
-            updates = get_updates(offset)
-            for upd in updates:
-                offset = upd["update_id"] + 1
-                process(upd)
-        except Exception as e:
-            log.error(f"polling: {e}")
-        time.sleep(1)
+# === WEBHOOK ===
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
+    update = await request.json()
+    Thread(target=process, args=(update,)).start()
+    return JSONResponse({"ok": True})
+
+# === НАЛАШТУВАННЯ WEBHOOK ===
+def set_webhook():
+    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    try:
+        r = requests.get(f"{BASE}/setWebhook", params={"url": url}, timeout=10)
+        if r.json().get("ok"):
+            log.info(f"Webhook встановлено: {url}")
+        else:
+            log.error(f"Webhook помилка: {r.text}")
+    except Exception as e:
+        log.error(f"set_webhook: {e}")
 
 # === ЗАПУСК ===
-if __name__ == "__main__":
+@app.on_event("startup")
+async def startup():
     log.info("Бот запущено!")
     init_sheet()
-    Thread(target=polling, daemon=True).start()
+    set_webhook()
     Thread(target=lambda: [check_reminders() or time.sleep(60) for _ in iter(int, 1)], daemon=True).start()
-    try:
-        while True: time.sleep(10)
-    except KeyboardInterrupt:
-        log.info("Зупинено")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=10000)
