@@ -1,36 +1,36 @@
-# bot.py — ЕКГ-БОТ НА RAILWAY (2025)
+# bot.py — WEBHOOK-ВЕРСІЯ: ШВИДКА, ЕКОНОМНА
 import os
 import re
 import logging
-import requests
 import time
 from datetime import datetime, timedelta
 from threading import Thread
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from dateutil import tz
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
+from fastapi import FastAPI, Request
 
-# === НАЛАШТУВАННЯ (взяті з твого коду) ===
-BOT_TOKEN = "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo"
-ADMIN_ID = 383222956
-SHEET_ID = "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50"
-CAL_ID = "1280758@gmail.com"
+# === НАЛАШТУВАННЯ ===
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8090016315:AAE_q_jKRWQzRbnHV9y4dDe-cwz8qVhlgqo")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 383222956))
+SHEET_ID = os.getenv("SHEET_ID", "1_ETwXqox8lGeLYNvM-V0JDgk6bxftqxAGHOm6x9eO50")
+CAL_ID = os.getenv("CAL_ID", "1280758@gmail.com")
 CREDS_S = "/etc/secrets/EKG_BOT_KEY"
 CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
+WEBHOOK_SECRET = "my_secret_token"  # Будь-який секрет для безпеки
 
 # === ЛОГІВАННЯ ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
 # === КОНСТАНТИ ===
-BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 LOCAL = tz.gettz('Europe/Kiev')
 u, cache, reminded, last_rec = {}, {}, set(), {}
 
 # === КЛАВІАТУРИ ===
-from telegram import ReplyKeyboardMarkup, KeyboardButton
-
 main_kb = ReplyKeyboardMarkup([
     [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")]
 ], resize_keyboard=True)
@@ -49,7 +49,7 @@ def date_kb():
     ], resize_keyboard=True)
 
 # === ВАЛИДАЦІЯ ===
-v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
+v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІ ЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
@@ -93,7 +93,7 @@ def free_60(d, t):
 def free_slots(d):
     slots = []
     cur = datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
-    end = datetime.combine(d, datetime.strptime("18:00", "%H:%M").time())
+    end = datetime.combine(d, datetime.strptime("18:00","%H:%M").time())
     while cur <= end:
         if free_60(d, cur.time()):
             slots.append(cur.strftime("%H:%M"))
@@ -176,13 +176,9 @@ def check_reminders():
 # === TELEGRAM ===
 def send(chat_id, text, reply_markup=None):
     try:
-        payload = {
-            "chat_id": chat_id,
-            "text": text
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup.to_dict()
-        requests.post(f"{BASE}/sendMessage", json=payload, timeout=10).raise_for_status()
+        requests.post(f"{BASE}/sendMessage", json={
+            "chat_id": chat_id, "text": text, "reply_markup": reply_markup
+        }, timeout=10).raise_for_status()
     except Exception as e:
         log.error(f"send error: {e}")
 
@@ -204,19 +200,19 @@ def process(update):
 
     if text == "Скасувати":
         u.pop(chat_id, None)
-        send(chat_id, "Скасовано.", main_kb)
+        send(chat_id, "Скасовано.", main)
         return
 
     if text == "Скасувати запис":
         if cancel_record(chat_id):
-            send(chat_id, "Запис скасовано!", main_kb)
+            send(chat_id, "Запис скасовано!", main)
         else:
-            send(chat_id, "Запис не знайдено", main_kb)
+            send(chat_id, "Запис не знайдено")
         return
 
     if text in ["/start", "Записатися на ЕКГ"]:
         u[chat_id] = {"step": "pib", "cid": chat_id}
-        send(chat_id, "ПІБ (Прізвище Ім'я По батькові):", cancel_kb)
+        send(chat_id, "ПІБ (Прізвище Ім'я По батькові):", cancel)
         return
 
     if chat_id not in u: return
@@ -224,12 +220,12 @@ def process(update):
     step = data["step"]
 
     steps = {
-        "pib": (v_pib, "gender", "Стать:", gender_kb),
-        "gender": (v_gender, "year", "Рік народження:", cancel_kb),
-        "year": (v_year, "phone", "Телефон:", cancel_kb),
-        "phone": (v_phone, "email", "Email (можна пропустити):", cancel_kb),
-        "email": (v_email, "addr", "Адреса:", cancel_kb),
-        "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
+        "pib": (v_pib, "gender", "Стать:", gender),
+        "gender": (v_gender, "year", "Рік народження:", cancel),
+        "year": (v_year, "phone", "Телефон:", cancel),
+        "phone": (v_phone, "email", "Email (можна пропустити):", cancel),
+        "email": (v_email, "addr", "Адреса:", cancel),
+        "addr": (lambda x: x.strip(), "date", "Дата:", date_k())
     }
 
     if step in steps:
@@ -239,12 +235,12 @@ def process(update):
             data["step"] = steps[step][1]
             send(chat_id, steps[step][2], steps[step][3])
         else:
-            if step == "email":
+            if step == "email" and (text == "" or text == "Скасувати"):
                 data[step] = ""
                 data["step"] = "addr"
-                send(chat_id, "Адреса:", cancel_kb)
+                send(chat_id, "Адреса:", cancel)
             else:
-                send(chat_id, "Невірно", cancel_kb)
+                send(chat_id, "Невірно", cancel)
         return
 
     if step == "date":
@@ -253,27 +249,22 @@ def process(update):
             data["date"] = date_val
             data["step"] = "time"
             slots = free_slots(date_val)
-            send(chat_id, f"Вільно {date_val.strftime('%d.%m')}:\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", cancel_kb)
+            send(chat_id, f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", cancel)
         else:
-            send(chat_id, "Невірна дата", date_kb())
+            send(chat_id, "Невірна дата", date_k())
 
     if step == "time":
-        try:
-            time_val = datetime.strptime(text.strip(), "%H:%M").time()
-            if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
-                raise ValueError
-            if free_60(data["date"], time_val):
-                full = f"{data['date'].strftime('%d.%m')} {text}"
-                conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
-                send(chat_id, f"{conf}\n\nДякую за запис!", main_kb)
-                send(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
-                add_event({**data, "time": time_val, "cid": chat_id, "full": full})
-                add_sheet({**data, "full": full})
-                u.pop(chat_id, None)
-            else:
-                send(chat_id, "Зайнято (±30 хв)", cancel_kb)
-        except:
-            send(chat_id, "Формат: ЧЧ:ХХ", cancel_kb)
+        time_val, err = v_time(text, data["date"])
+        if time_val:
+            full = f"{data['date'].strftime('%d.%m')} {text}"
+            conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
+            send(chat_id, f"{conf}\n\nДякую за запис!", main)
+            send(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
+            add_event({**data, "time": time_val, "cid": chat_id, "full": full})
+            add_sheet({**data, "full": full})
+            u.pop(chat_id, None)
+        else:
+            send(chat_id, err, cancel)
 
 # === ПОЛІНГ ===
 def polling():
@@ -297,9 +288,4 @@ if __name__ == "__main__":
     try:
         while True: time.sleep(10)
     except KeyboardInterrupt:
-
         log.info("Зупинено")
-
-
-
-
