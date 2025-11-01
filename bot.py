@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + debug)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + welcome message)
 import os
 import re
 import logging
@@ -41,7 +41,7 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}
+u, cache, reminded, last_rec, booked_slots, seen_users = {}, {}, set(), {}, {}, {}  # Додано seen_users для відстеження нових користувачів
 executor = ThreadPoolExecutor(max_workers=2)
 lock = threading.Lock()
 
@@ -237,7 +237,7 @@ async def check_reminders():
 
 # === ОБРОБКА ===
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global u
+    global u, seen_users
     msg = update.message
     if not msg:
         log.warning(f"Отримано оновлення без повідомлення: {update}")
@@ -245,6 +245,17 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat_id
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
+
+    # Вітальне повідомлення для нового користувача
+    if chat_id not in seen_users:
+        welcome_message = (
+            "Ласкаво просимо! 🎉\n"
+            "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
+            "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
+            "Для скасування запису використовуйте 'Скасувати запис'."
+        )
+        await msg.reply_text(welcome_message, reply_markup=main_kb)
+        seen_users[chat_id] = True
 
     if text == "Скасувати":
         u.pop(chat_id, None)
