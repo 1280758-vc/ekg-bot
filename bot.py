@@ -12,6 +12,7 @@ import uvicorn
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
+from contextlib import asynccontextmanager
 
 # === ІМПОРТИ TELEGRAM v21+ ===
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
@@ -40,9 +41,9 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}  # booked_slots для синхронізації
+u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}
 executor = ThreadPoolExecutor(max_workers=2)
-lock = threading.Lock()  # Блокування для booked_slots
+lock = threading.Lock()
 
 # === APPLICATION ===
 application = Application.builder().token(BOT_TOKEN).build()
@@ -79,7 +80,7 @@ v_date = lambda x: (
     if datetime.strptime(x.strip(),"%d.%m").replace(year=datetime.now().year).date() >= datetime.now().date() else None
 )
 
-# === КАЛЕНДАР (оптимізований з таймаутом) ===
+# === КАЛЕНДАР ===
 def get_events_async(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache and time.time() - cache[ds][1] < 300:
@@ -106,9 +107,9 @@ def free_60(d, t):
     dt = datetime.combine(d, t).replace(tzinfo=LOCAL)
     start_check = dt - timedelta(minutes=30)
     end_check = dt + timedelta(minutes=30)
-    asyncio.run(get_events(d))  # Оновлюємо кеш
+    asyncio.run(get_events(d))
     events = cache.get(d.strftime("%Y-%m-%d"), [{}])[0]
-    with lock:  # Синхронізація з booked_slots
+    with lock:
         for booked_dt in booked_slots.get(d.strftime("%Y-%m-%d"), []):
             booked_start = booked_dt - timedelta(minutes=30)
             booked_end = booked_dt + timedelta(minutes=30)
@@ -177,7 +178,7 @@ def add_sheet(data):
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
-            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
+            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
         ).execute()
     except Exception as e:
         log.error(f"add_sheet: {e}")
@@ -328,6 +329,23 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("Формат: ЧЧ:ХХ", reply_markup=cancel_kb)
             log.error(f"Помилка обробки часу для {chat_id}: {e}")
 
+# === LIFESPAN ===
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Бот запущено!")
+    init_sheet()
+    await application.initialize()
+    await application.start()
+    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    await application.bot.set_webhook(url=url)
+    log.info(f"Webhook встановлено: {url}")
+    asyncio.create_task(reminder_loop())
+    yield
+    await application.stop()
+    await application.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
 # === WEBHOOK ===
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -341,28 +359,11 @@ async def webhook(request: Request):
 async def root():
     return {"message": "EKG Bot is running!"}
 
-# === НАГАДУВАННЯ В ФОНІ ===
+# === НАГАДУВАННЯ ===
 async def reminder_loop():
     while True:
         await check_reminders()
         await asyncio.sleep(60)
-
-# === LIFESPAN EVENTS ===
-@app.on_event("startup")
-async def startup_event():
-    log.info("Бот запущено!")
-    init_sheet()
-    await application.initialize()
-    await application.start()
-    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
-    await application.bot.set_webhook(url=url)
-    log.info(f"Webhook встановлено: {url}")
-    asyncio.create_task(reminder_loop())
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await application.stop()
-    await application.shutdown()
 
 # === HEALTH CHECK ===
 @app.get("/health")
