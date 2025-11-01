@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + bot description on entry)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + bot description on first entry)
 import os
 import re
 import logging
@@ -41,7 +41,7 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec, booked_slots, show_welcome = {}, {}, set(), {}, {}, {}
+u, cache, reminded, last_rec, booked_slots, show_welcome = {}, {}, set(), {}, {}, {}  # show_welcome для відстеження
 executor = ThreadPoolExecutor(max_workers=2)
 lock = threading.Lock()
 
@@ -248,14 +248,14 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
-    # Опис бота при вході або після завершення
-    if chat_id not in u and chat_id not in show_welcome:
+    # Опис бота при першому вході або після завершення
+    if chat_id not in show_welcome:  # Показуємо опис при першому оновленні
         bot_description = (
             "Цей бот призначений для запису на електрокардіограму (ЕКГ) вдома.\n"
             "Оберіть 'Записатися на ЕКГ', щоб почати, або 'Скасувати запис', якщо потрібно скасувати попередній запис."
         )
         await msg.reply_text(bot_description, reply_markup=main_kb)
-        show_welcome[chat_id] = True
+        show_welcome[chat_id] = True  # Позначаємо, що опис показано
 
     if text == "Скасувати":
         u.pop(chat_id, None)
@@ -275,7 +275,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         log.info(f"Користувач {chat_id} почав запис")
-        show_welcome[chat_id] = False  # Скидаємо після початку
+        show_welcome[chat_id] = False  # Скидаємо після початку, щоб опис з’являвся знову після завершення
         return
 
     if chat_id not in u:
