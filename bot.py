@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + bot description on first entry)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + bot description on first interaction)
 import os
 import re
 import logging
@@ -248,7 +248,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
-    # Опис бота при першому вході або після завершення
+    # Опис бота при першому оновленні або після завершення
     if chat_id not in show_welcome:  # Показуємо опис при першому оновленні
         bot_description = (
             "Цей бот призначений для запису на електрокардіограму (ЕКГ) вдома.\n"
@@ -266,6 +266,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Скасувати запис":
         if cancel_record(chat_id):
             await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
+            show_welcome[chat_id] = False  # Скидаємо, щоб опис з’являвся знову
         else:
             await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
         log.info(f"Скасування запису для {chat_id}")
@@ -275,7 +276,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         log.info(f"Користувач {chat_id} почав запис")
-        show_welcome[chat_id] = False  # Скидаємо після початку, щоб опис з’являвся знову після завершення
+        show_welcome[chat_id] = False  # Скидаємо після початку
         return
 
     if chat_id not in u:
