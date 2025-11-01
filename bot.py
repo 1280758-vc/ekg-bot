@@ -151,4 +151,91 @@ async def free_slots_async(d):
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
     if cid in last_rec and os.path.exists(CREDS_C):
-       
+        try:
+            service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
+            event_id = last_rec[cid]["event_id"]
+            dt = datetime.strptime(last_rec[cid]["full_dt"], "%d.%m %H:%M").replace(tzinfo=LOCAL)
+            service.events().delete(calendarId=CAL_ID, eventId=event_id).execute()
+            with lock:
+                ds = dt.date().strftime("%Y-%m-%d")
+                if ds in booked_slots:
+                    booked_slots[ds].remove(dt)
+                    if not booked_slots[ds]:
+                        del booked_slots[ds]
+            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}"))
+            last_rec.pop(cid, None)
+            return True
+        except Exception as e:
+            log.error(f"cancel_record: {e}")
+    return False
+
+# === ЗАПИС ===
+def init_sheet():
+    if not os.path.exists(CREDS_S): return
+    try:
+        service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
+        values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
+        if not values or values[0] != ["Дата запису", "ПІБ", "Стать", "Р.н.", "Телефон", "Email", "Адреса", "Дата і час"]:
+            service.spreadsheets().values().append(
+                spreadsheetId=SHEET_ID, range="A1", valueInputOption="RAW",
+                body={"values": [["Дата запису", "ПІБ", "Стать", "Р.н.", "Телефон", "Email", "Адреса", "Дата і час"]]}
+            ).execute()
+    except Exception as e:
+        log.error(f"init_sheet: {e}")
+
+def add_sheet(data):
+    if not os.path.exists(CREDS_S): return
+    try:
+        build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
+            spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
+            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
+        ).execute()
+    except Exception as e:
+        log.error(f"add_sheet: {e}")
+
+def add_event(data):
+    if not os.path.exists(CREDS_C): return False
+    try:
+        dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
+        service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
+        event = service.events().insert(calendarId=CAL_ID, body={
+            "summary": f"ЕКГ: {data['pib']} ({data['phone']})",
+            "location": data["addr"],
+            "description": f"Email: {data.get('email','—')}\nР.н.: {data['year']}\nСтать: {data['gender']}\nChat ID: {data['cid']}",
+            "start": {"dateTime": (dt - timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"},
+            "end": {"dateTime": (dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"}
+        }).execute()
+        with lock:
+            ds = data["date"].strftime("%Y-%m-%d")
+            if ds not in booked_slots:
+                booked_slots[ds] = []
+            booked_slots[ds].append(dt)
+        last_rec[data['cid']] = {"event_id": event["id"], "full_dt": data["full"]}
+        return True
+    except Exception as e:
+        log.error(f"add_event: {e}")
+        asyncio.create_task(application.bot.send_message(ADMIN_ID, f"ПОМИЛКА КАЛЕНДАРЯ: {e}"))
+        return False
+
+# === НАГАДУВАННЯ ===
+async def check_reminders():
+    now = datetime.now(LOCAL)
+    for day in [now.date(), (now + timedelta(days=1)).date()]:
+        for e in await get_events(day):
+            try:
+                start_str = e["start"]["dateTime"]
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")).astimezone(LOCAL)
+                mins_left = int((start_dt - now).total_seconds() // 60)
+                eid = e["id"]
+                if mins_left in [30, 10] and (eid, mins_left) not in reminded:
+                    desc = e.get("description", "")
+                    cid_match = re.search(r"Chat ID: (\d+)", desc)
+                    cid = int(cid_match.group(1)) if cid_match else None
+                    msg = f"НАГАДУВАННЯ!\nЕКГ через {mins_left} хв\n{e['summary']}\nЧас: {start_dt.strftime('%H:%M')}"
+                    if cid: await application.bot.send_message(cid, msg)
+                    await application.bot.send_message(ADMIN_ID, f"НАГАДУВАННЯ:\n{msg}")
+                    reminded.add((eid, mins_left))
+            except: continue
+
+# === ОБРОБКА ===
+async def process_update(update: Update, context: Context
