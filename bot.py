@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + optimized booking)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + debug)
 import os
 import re
 import logging
@@ -94,6 +94,7 @@ def get_events_async(d):
         end = (datetime.combine(d, datetime.max.time()) - timedelta(seconds=1)).isoformat() + "Z"
         events = service.events().list(calendarId=CAL_ID, timeMin=start, timeMax=end, singleEvents=True).execute(num_retries=2)
         cache[ds] = (events.get("items", []), time.time())
+        log.info(f"Кеш оновлено для {ds}: {len(events.get('items', []))} подій")
         return cache[ds][0]
     except Exception as e:
         log.error(f"get_events: {e}")
@@ -120,23 +121,30 @@ def free_60(d, t):
             estart = datetime.fromisoformat(e["start"]["dateTime"].replace("Z", "+00:00")).astimezone(LOCAL)
             if start_check < estart < end_check:
                 return False
-        except: continue
+        except Exception as e:
+            log.error(f"free_60: Помилка обробки події {e}")
+            continue
     return True
 
 async def free_slots_async(d):
-    loop = asyncio.get_event_loop()
-    slots = await loop.run_in_executor(executor, lambda: [
-        cur.strftime("%H:%M") for cur in (
-            datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()),
-            *[
-                cur + timedelta(minutes=15) for cur in [
-                    datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
-                    for _ in range(36)
-                ][1:]
-            ]
-        ) if cur <= datetime.combine(d, datetime.strptime("18:00", "%H:%M").time()) and asyncio.run_coroutine_threadsafe(free_60(d, cur.time()), loop).result()
-    ])
-    return slots
+    try:
+        loop = asyncio.get_event_loop()
+        slots = await loop.run_in_executor(executor, lambda: [
+            cur.strftime("%H:%M") for cur in (
+                datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()),
+                *[
+                    cur + timedelta(minutes=15) for cur in [
+                        datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
+                        for _ in range(36)
+                    ][1:]
+                ]
+            ) if cur <= datetime.combine(d, datetime.strptime("18:00", "%H:%M").time()) and asyncio.run_coroutine_threadsafe(free_60(d, cur.time()), loop).result()
+        ])
+        log.info(f"Знайдено слоти для {d.strftime('%d.%m')}: {slots}")
+        return slots if slots else []
+    except Exception as e:
+        log.error(f"free_slots_async: Помилка {e}")
+        return []
 
 # === СКАСУВАННЯ ===
 def cancel_record(cid):
@@ -178,7 +186,7 @@ def add_sheet(data):
     try:
         build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
-            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
+            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
         ).execute()
     except Exception as e:
         log.error(f"add_sheet: {e}")
@@ -299,9 +307,17 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if date_val:
             data["date"] = date_val
             data["step"] = "time"
-            slots = await free_slots_async(date_val)
-            await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + ("\n".join(f"• {s}" for s in slots) if slots else "• Немає") + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
-            log.info(f"Крок {chat_id} змінено на time, слоти: {slots}")
+            try:
+                slots = await free_slots_async(date_val)
+                if not slots:
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв): • Немає\nСпробуйте іншу дату.", reply_markup=date_kb())
+                    log.warning(f"Немає вільних слотів для {date_val.strftime('%d.%m')}")
+                else:
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
+                    log.info(f"Крок {chat_id} змінено на time, слоти: {slots}")
+            except Exception as e:
+                await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
+                log.error(f"Помилка отримання слотів для {date_val}: {e}")
         else:
             await msg.reply_text("Невірна дата", reply_markup=date_kb())
             log.warning(f"Невірна дата від {chat_id}")
