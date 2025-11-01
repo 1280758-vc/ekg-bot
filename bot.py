@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + skip email button)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + bot description on entry)
 import os
 import re
 import logging
@@ -66,7 +66,7 @@ def date_kb():
         [KeyboardButton("Скасувати")]
     ], resize_keyboard=True)
 
-email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити")]], resize_keyboard=True)  # Нова клавіатура
+email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити")]], resize_keyboard=True)
 
 # === ВАЛИДАЦІЯ ===
 v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІ ЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
@@ -248,15 +248,13 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
-    # Вітальне повідомлення при вході або після завершення
+    # Опис бота при вході або після завершення
     if chat_id not in u and chat_id not in show_welcome:
-        welcome_message = (
-            "Ласкаво просимо! 🎉\n"
-            "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
-            "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
-            "Для скасування запису використовуйте 'Скасувати запис'."
+        bot_description = (
+            "Цей бот призначений для запису на електрокардіограму (ЕКГ) вдома.\n"
+            "Оберіть 'Записатися на ЕКГ', щоб почати, або 'Скасувати запис', якщо потрібно скасувати попередній запис."
         )
-        await msg.reply_text(welcome_message, reply_markup=main_kb)
+        await msg.reply_text(bot_description, reply_markup=main_kb)
         show_welcome[chat_id] = True
 
     if text == "Скасувати":
@@ -351,7 +349,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if add_event({**data, "time": time_val, "cid": chat_id, "full": full}):
                     add_sheet({**data, "full": full})
                     u.pop(chat_id, None)  # Видаляємо користувача після запису
-                    show_welcome[chat_id] = True  # Встановлюємо стан для показу вітання при наступному вході
+                    show_welcome[chat_id] = True  # Встановлюємо стан для показу опису при наступному вході
                     log.info(f"Запис завершено для {chat_id}")
             else:
                 await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
