@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + welcome every time + email clarification)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + skip email button)
 import os
 import re
 import logging
@@ -41,7 +41,7 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}
+u, cache, reminded, last_rec, booked_slots, show_welcome = {}, {}, set(), {}, {}, {}
 executor = ThreadPoolExecutor(max_workers=2)
 lock = threading.Lock()
 
@@ -66,12 +66,14 @@ def date_kb():
         [KeyboardButton("Скасувати")]
     ], resize_keyboard=True)
 
+email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити")]], resize_keyboard=True)  # Нова клавіатура
+
 # === ВАЛИДАЦІЯ ===
 v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІ ЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None  # Дозволяю порожнє значення
+v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -237,7 +239,7 @@ async def check_reminders():
 
 # === ОБРОБКА ===
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global u
+    global u, show_welcome
     msg = update.message
     if not msg:
         log.warning(f"Отримано оновлення без повідомлення: {update}")
@@ -246,14 +248,16 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
-    # Вітальне повідомлення при кожному вході
-    welcome_message = (
-        "Ласкаво просимо! 🎉\n"
-        "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
-        "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
-        "Для скасування запису використовуйте 'Скасувати запис'."
-    )
-    await msg.reply_text(welcome_message, reply_markup=main_kb)
+    # Вітальне повідомлення при вході або після завершення
+    if chat_id not in u and chat_id not in show_welcome:
+        welcome_message = (
+            "Ласкаво просимо! 🎉\n"
+            "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
+            "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
+            "Для скасування запису використовуйте 'Скасувати запис'."
+        )
+        await msg.reply_text(welcome_message, reply_markup=main_kb)
+        show_welcome[chat_id] = True
 
     if text == "Скасувати":
         u.pop(chat_id, None)
@@ -273,6 +277,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         log.info(f"Користувач {chat_id} почав запис")
+        show_welcome[chat_id] = False  # Скидаємо після початку
         return
 
     if chat_id not in u:
@@ -286,7 +291,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pib": (v_pib, "gender", "Стать:", gender_kb),
         "gender": (v_gender, "year", "Рік народження:", cancel_kb),
         "year": (v_year, "phone", "Телефон:", cancel_kb),
-        "phone": (v_phone, "email", "Email (необов'язково, введіть хоч один символ або залиште порожнім):", cancel_kb),
+        "phone": (v_phone, "email", "Email (необов'язково, введіть хоч один символ або натисніть 'Пропустити'):", email_kb),
         "email": (v_email, "addr", "Адреса:", cancel_kb),
         "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
     }
@@ -300,7 +305,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
             log.info(f"Крок {chat_id} змінено на {steps[step][1]}")
         else:
-            if step == "email" and (text == "" or text == "Скасувати"):
+            if step == "email" and (text == "" or text == "Пропустити"):
                 data[step] = ""
                 data["step"] = "addr"
                 await msg.reply_text("Адреса:", reply_markup=cancel_kb)
@@ -345,7 +350,8 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
                 if add_event({**data, "time": time_val, "cid": chat_id, "full": full}):
                     add_sheet({**data, "full": full})
-                    u.pop(chat_id, None)
+                    u.pop(chat_id, None)  # Видаляємо користувача після запису
+                    show_welcome[chat_id] = True  # Встановлюємо стан для показу вітання при наступному вході
                     log.info(f"Запис завершено для {chat_id}")
             else:
                 await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
