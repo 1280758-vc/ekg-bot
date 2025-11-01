@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + lifespan + welcome message)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + welcome every time + email clarification)
 import os
 import re
 import logging
@@ -41,7 +41,7 @@ app = FastAPI()
 
 # === КОНСТАНТИ ===
 LOCAL = tz.gettz('Europe/Kiev')
-u, cache, reminded, last_rec, booked_slots, seen_users = {}, {}, set(), {}, {}, {}  # Додано seen_users для відстеження нових користувачів
+u, cache, reminded, last_rec, booked_slots = {}, {}, set(), {}, {}
 executor = ThreadPoolExecutor(max_workers=2)
 lock = threading.Lock()
 
@@ -71,7 +71,7 @@ v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 an
 v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
-v_email = lambda x: x.strip() if x and re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else ""
+v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None  # Дозволяю порожнє значення
 v_date = lambda x: (
     datetime.now().date() if "Сьогодні" in x else
     (datetime.now() + timedelta(days=1)).date() if "Завтра" in x else
@@ -237,7 +237,7 @@ async def check_reminders():
 
 # === ОБРОБКА ===
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global u, seen_users
+    global u
     msg = update.message
     if not msg:
         log.warning(f"Отримано оновлення без повідомлення: {update}")
@@ -246,16 +246,14 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip() if msg.text else ""
     log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
 
-    # Вітальне повідомлення для нового користувача
-    if chat_id not in seen_users:
-        welcome_message = (
-            "Ласкаво просимо! 🎉\n"
-            "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
-            "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
-            "Для скасування запису використовуйте 'Скасувати запис'."
-        )
-        await msg.reply_text(welcome_message, reply_markup=main_kb)
-        seen_users[chat_id] = True
+    # Вітальне повідомлення при кожному вході
+    welcome_message = (
+        "Ласкаво просимо! 🎉\n"
+        "Це бот для запису на електрокардіограму (ЕКГ) вдома.\n"
+        "Щоб почати, натисніть /start або 'Записатися на ЕКГ'.\n"
+        "Для скасування запису використовуйте 'Скасувати запис'."
+    )
+    await msg.reply_text(welcome_message, reply_markup=main_kb)
 
     if text == "Скасувати":
         u.pop(chat_id, None)
@@ -288,7 +286,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "pib": (v_pib, "gender", "Стать:", gender_kb),
         "gender": (v_gender, "year", "Рік народження:", cancel_kb),
         "year": (v_year, "phone", "Телефон:", cancel_kb),
-        "phone": (v_phone, "email", "Email (можна пропустити):", cancel_kb),
+        "phone": (v_phone, "email", "Email (необов'язково, введіть хоч один символ або залиште порожнім):", cancel_kb),
         "email": (v_email, "addr", "Адреса:", cancel_kb),
         "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
     }
