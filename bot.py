@@ -238,4 +238,172 @@ async def check_reminders():
             except: continue
 
 # === ОБРОБКА ===
-async def process_update(update: Update, context: Context
+async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global u, show_welcome
+    msg = update.message
+    if not msg:
+        log.warning(f"Отримано оновлення без повідомлення: {update}")
+        return
+    chat_id = msg.chat_id
+    text = msg.text.strip() if msg.text else ""
+    log.info(f"Отримано повідомлення від {chat_id}: '{text}'")
+
+    # Фільтр спаму: Ігноруємо повідомлення з шкідливими посиланнями
+    if "ordershunter.ru" in text.lower() or "premium_gift" in text.lower():
+        log.warning(f"Ігноруємо спам від {chat_id}: '{text}'")
+        return  # Не обробляємо спам
+
+    # Опис бота при першому оновленні або після завершення
+    if chat_id not in show_welcome:
+        bot_description = (
+            "Цей бот призначений для запису на електрокардіограму (ЕКГ) вдома.\n"
+            "Оберіть 'Записатися на ЕКГ', щоб почати, або 'Скасувати запис', якщо потрібно скасувати попередній запис."
+        )
+        await msg.reply_text(bot_description, reply_markup=main_kb)
+        show_welcome[chat_id] = True  # Позначаємо, що опис показано
+
+    if text == "Скасувати":
+        u.pop(chat_id, None)
+        await msg.reply_text("Скасовано.", reply_markup=main_kb)
+        log.info(f"Користувач {chat_id} скасував")
+        return
+
+    if text == "Скасувати запис":
+        if cancel_record(chat_id):
+            await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
+            show_welcome[chat_id] = False  # Скидаємо, щоб опис з’являвся знову
+        else:
+            await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
+        log.info(f"Скасування запису для {chat_id}")
+        return
+
+    if text in ["/start", "Записатися на ЕКГ"]:
+        u[chat_id] = {"step": "pib", "cid": chat_id}
+        await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
+        log.info(f"Користувач {chat_id} почав запис")
+        show_welcome[chat_id] = False  # Скидаємо після початку
+        return
+
+    if chat_id not in u:
+        log.warning(f"Невідомий чат {chat_id} відправив: '{text}'")
+        return
+    data = u[chat_id]
+    step = data["step"]
+    log.info(f"Крок для {chat_id}: {step}, введено: '{text}'")
+
+    steps = {
+        "pib": (v_pib, "gender", "Стать:", gender_kb),
+        "gender": (v_gender, "year", "Рік народження:", cancel_kb),
+        "year": (v_year, "phone", "Телефон:", cancel_kb),
+        "phone": (v_phone, "email", "Email (необов'язково, введіть хоч один символ або натисніть 'Пропустити'):", email_kb),
+        "email": (v_email, "addr", "Адреса:", cancel_kb),
+        "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
+    }
+
+    if step in steps:
+        val = steps[step][0](text)
+        log.debug(f"Валідація {step}: '{text}' → {val}")
+        if val is not None:
+            data[step] = val
+            data["step"] = steps[step][1]
+            await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
+            log.info(f"Крок {chat_id} змінено на {steps[step][1]}")
+        else:
+            if step == "email" and (text == "" or text == "Пропустити"):
+                data[step] = ""
+                data["step"] = "addr"
+                await msg.reply_text("Адреса:", reply_markup=cancel_kb)
+                log.info(f"Пропущено email для {chat_id}")
+            else:
+                await msg.reply_text("Невірно", reply_markup=cancel_kb)
+                log.warning(f"Невірний ввід для {chat_id} на кроці {step}")
+        return
+
+    if step == "date":
+        date_val = v_date(text)
+        log.debug(f"Валідація дати: '{text}' → {date_val}")
+        if date_val:
+            data["date"] = date_val
+            data["step"] = "time"
+            try:
+                slots = await free_slots_async(date_val)
+                if not slots:
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв): • Немає\nСпробуйте іншу дату.", reply_markup=date_kb())
+                    log.warning(f"Немає вільних слотів для {date_val.strftime('%d.%m')}")
+                else:
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
+                    log.info(f"Крок {chat_id} змінено на time, слоти: {slots}")
+            except Exception as e:
+                await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
+                log.error(f"Помилка отримання слотів для {date_val}: {e}")
+        else:
+            await msg.reply_text("Невірна дата", reply_markup=date_kb())
+            log.warning(f"Невірна дата від {chat_id}")
+
+    if step == "time":
+        try:
+            time_val = datetime.strptime(text.strip(), "%H:%M").time()
+            log.debug(f"Валідація часу: '{text}' → {time_val}")
+            if not (datetime.strptime("09:00","%H:%M").time() <= time_val <= datetime.strptime("18:00","%H:%M").time()):
+                raise ValueError
+            dt = datetime.combine(data["date"], time_val).replace(tzinfo=LOCAL)
+            if await asyncio.to_thread(free_60, data["date"], time_val):
+                full = f"{data['date'].strftime('%d.%m')} {text}"
+                conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
+                await msg.reply_text(f"{conf}\n\nДякую за запис!", reply_markup=main_kb)
+                await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
+                if add_event({**data, "time": time_val, "cid": chat_id, "full": full}):
+                    add_sheet({**data, "full": full})
+                    u.pop(chat_id, None)  # Видаляємо користувача після запису
+                    show_welcome[chat_id] = True  # Встановлюємо стан для показу опису при наступному вході
+                    log.info(f"Запис завершено для {chat_id}")
+            else:
+                await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
+                log.warning(f"Час зайнято для {chat_id}")
+        except Exception as e:
+            await msg.reply_text("Формат: ЧЧ:ХХ", reply_markup=cancel_kb)
+            log.error(f"Помилка обробки часу для {chat_id}: {e}")
+
+# === LIFESPAN ===
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Бот запущено!")
+    init_sheet()
+    await application.initialize()
+    await application.start()
+    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    await application.bot.set_webhook(url=url)
+    log.info(f"Webhook встановлено: {url}")
+    asyncio.create_task(reminder_loop())
+    yield
+    await application.stop()
+    await application.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
+# === WEBHOOK ===
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
+    json_data = await request.json()
+    update = Update.de_json(json_data, application.bot)
+    log.info(f"Отримано webhook: {update}")
+    asyncio.create_task(process_update(update, None))
+    return JSONResponse({"ok": True})
+
+@app.get("/")
+async def root():
+    return {"message": "EKG Bot is running!"}
+
+# === НАГАДУВАННЯ ===
+async def reminder_loop():
+    while True:
+        await check_reminders()
+        await asyncio.sleep(60)
+
+# === HEALTH CHECK ===
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=10000)
