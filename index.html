@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + enhanced logging for slots)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed async slot logic)
 import os
 import re
 import logging
@@ -62,7 +62,7 @@ def date_kb():
     day_after = (datetime.now() + timedelta(days=2)).strftime("%d.%m – Післязавтра")
     return ReplyKeyboardMarkup([
         [KeyboardButton(today), KeyboardButton(tomorrow)],
-        [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ)")],
+        [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ.ЯЯЯЯ)")],
         [KeyboardButton("Скасувати")]
     ], resize_keyboard=True)
 
@@ -78,28 +78,29 @@ v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-
 def v_date(x):
     log.info(f"v_date: Вхідний текст '{x}'")
     x = x.strip()
+    current_year = datetime.now().year
     if "Сьогодні" in x or x.startswith(datetime.now().strftime("%d.%m")):
         date_val = datetime.now().date()
-        log.info(f"v_date: Вибрано 'Сьогодні' — дата {date_val.strftime('%d.%m')}")
+        log.info(f"v_date: Вибрано 'Сьогодні' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
     elif "Завтра" in x or x.startswith((datetime.now() + timedelta(days=1)).strftime("%d.%m")):
         date_val = (datetime.now() + timedelta(days=1)).date()
-        log.info(f"v_date: Вибрано 'Завтра' — дата {date_val.strftime('%d.%m')}")
+        log.info(f"v_date: Вибрано 'Завтра' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
     elif "Післязавтра" in x or x.startswith((datetime.now() + timedelta(days=2)).strftime("%d.%m")):
         date_val = (datetime.now() + timedelta(days=2)).date()
-        log.info(f"v_date: Вибрано 'Післязавтра' — дата {date_val.strftime('%d.%m')}")
+        log.info(f"v_date: Вибрано 'Післязавтра' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
     else:
         try:
             if " – " in x:
                 x = x.split(" – ")[0]  # Беремо тільки дату перед " – "
-            date_val = datetime.strptime(x, "%d.%m").replace(year=datetime.now().year).date()
+            date_val = datetime.strptime(x, "%d.%m.%Y").date()
             if date_val >= datetime.now().date():
-                log.info(f"v_date: Оброблено 'ДД.ММ' — дата {date_val.strftime('%d.%m')}")
+                log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯЯЯ' — дата {date_val.strftime('%d.%m.%Y')}")
                 return date_val
             else:
-                log.warning(f"v_date: Дата {date_val.strftime('%d.%m')} в минулому")
+                log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
                 return None
         except ValueError as e:
             log.error(f"v_date: Помилка парсингу дати '{x}': {e}")
@@ -118,7 +119,7 @@ def get_events_async(d):
         service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES), cache_discovery=False)
         start = datetime.combine(d, datetime.min.time()).isoformat() + "Z"
         end = (datetime.combine(d, datetime.max.time()) - timedelta(seconds=1)).isoformat() + "Z"
-        events = service.events().list(calendarId=CAL_ID, timeMin=start, timeMax=end, singleEvents=True).execute(num_retries=2)
+        events = service.events().list(calendarId=CAL_ID, timeMin=start, timeMax=end, singleEvents=True).execute(num_retries=3)
         events_list = events.get("items", [])
         cache[ds] = (events_list, time.time())
         log.info(f"get_events_async: Оновлено кеш для {ds} з {len(events_list)} подіями")
@@ -159,6 +160,11 @@ def free_60(d, t):
 async def free_slots_async(d):
     try:
         loop = asyncio.get_event_loop()
+        # Очищаємо кеш для нової дати
+        ds = d.strftime("%Y-%m-%d")
+        if ds in cache:
+            del cache[ds]
+        log.info(f"free_slots_async: Очищено кеш для {ds}")
         slots = await loop.run_in_executor(executor, lambda: [
             cur.strftime("%H:%M") for cur in (
                 datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()),
@@ -170,10 +176,10 @@ async def free_slots_async(d):
                 ]
             ) if cur <= datetime.combine(d, datetime.strptime("18:00", "%H:%M").time()) and asyncio.run_coroutine_threadsafe(free_60(d, cur.time()), loop).result()
         ])
-        log.info(f"free_slots_async: Знайдено слоти для {d.strftime('%d.%m')}: {slots}")
+        log.info(f"free_slots_async: Знайдено слоти для {d.strftime('%d.%m.%Y')}: {slots}")
         return slots if slots else []
     except Exception as e:
-        log.error(f"free_slots_async: Помилка при отриманні слотів для {d.strftime('%d.%m')}: {e}")
+        log.error(f"free_slots_async: Помилка при отриманні слотів для {d.strftime('%d.%m.%Y')}: {e}")
         return []
 
 # === СКАСУВАННЯ ===
@@ -356,16 +362,16 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 slots = await free_slots_async(date_val)
                 if not slots:
-                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв): • Немає\nСпробуйте іншу дату.", reply_markup=date_kb())
-                    log.warning(f"free_slots_async: Немає вільних слотів для {date_val.strftime('%d.%m')}")
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m.%Y')} (60 хв): • Немає\nСпробуйте іншу дату.", reply_markup=date_kb())
+                    log.warning(f"free_slots_async: Немає вільних слотів для {date_val.strftime('%d.%m.%Y')}")
                 else:
-                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m')} (60 хв):\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
+                    await msg.reply_text(f"Вільно {date_val.strftime('%d.%m.%Y')} (60 хв):\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВведіть час (09:00–18:00):", reply_markup=cancel_kb)
                     log.info(f"free_slots_async: Крок {chat_id} змінено на time, слоти: {slots}")
             except Exception as e:
                 await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
                 log.error(f"free_slots_async: Помилка отримання слотів для {date_val}: {e}")
         else:
-            await msg.reply_text("Невірна дата", reply_markup=date_kb())
+            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯЯЯ", reply_markup=date_kb())
             log.warning(f"v_date: Невірна дата від {chat_id}")
 
     if step == "time":
@@ -376,7 +382,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError
             dt = datetime.combine(data["date"], time_val).replace(tzinfo=LOCAL)
             if await asyncio.to_thread(free_60, data["date"], time_val):
-                full = f"{data['date'].strftime('%d.%m')} {text}"
+                full = f"{data['date'].strftime('%d.%m.%Y')} {text}"
                 conf = f"Запис:\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
                 await msg.reply_text(f"{conf}\n\nДякую за запис!", reply_markup=main_kb)
                 await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
