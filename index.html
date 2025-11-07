@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date validation + logging)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed v_date for full button text)
 import os
 import re
 import logging
@@ -76,7 +76,6 @@ v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")
 v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None
 
 def v_date(x):
-    # Додане логування для діагностики
     log.info(f"v_date: Вхідний текст '{x}'")
     x = x.strip()
     if "Сьогодні" in x:
@@ -93,7 +92,9 @@ def v_date(x):
         return date_val
     else:
         try:
-            # Обробка "ДД.ММ"
+            # Обробка "ДД.ММ" — ігноруємо текст після дати
+            if " – " in x:
+                x = x.split(" – ")[0]  # Беремо тільки дату перед " – "
             date_val = datetime.strptime(x, "%d.%m").replace(year=datetime.now().year).date()
             if date_val >= datetime.now().date():
                 log.info(f"v_date: Оброблено 'ДД.ММ' — дата {date_val.strftime('%d.%m')}")
