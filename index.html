@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date input logic)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date input enforcement)
 import os
 import re
 import logging
@@ -358,6 +358,9 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "date":
+        if text == "Інша дата (ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ)":
+            await msg.reply_text("Введіть дату у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 10.11.25):", reply_markup=cancel_kb)
+            return
         date_val = v_date(text)
         log.debug(f"Валідація дати: '{text}' → {date_val}")
         if date_val:
@@ -375,7 +378,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
                 log.error(f"free_slots_async: Помилка отримання слотів для {date_val}: {e}")
         else:
-            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ", reply_markup=date_kb())
+            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 10.11.25)", reply_markup=cancel_kb)
             log.warning(f"v_date: Невірна дата від {chat_id}")
 
     if step == "time":
