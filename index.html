@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed async slot logic)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date input logic)
 import os
 import re
 import logging
@@ -62,7 +62,7 @@ def date_kb():
     day_after = (datetime.now() + timedelta(days=2)).strftime("%d.%m – Післязавтра")
     return ReplyKeyboardMarkup([
         [KeyboardButton(today), KeyboardButton(tomorrow)],
-        [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ.ЯЯЯЯ)")],
+        [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ)")],
         [KeyboardButton("Скасувати")]
     ], resize_keyboard=True)
 
@@ -95,9 +95,14 @@ def v_date(x):
         try:
             if " – " in x:
                 x = x.split(" – ")[0]  # Беремо тільки дату перед " – "
-            date_val = datetime.strptime(x, "%d.%m.%Y").date()
+            if len(x.split('.')) == 3:
+                if len(x.split('.')[2]) == 2:
+                    x = x + str(current_year)[2:]  # Додаємо повний рік, якщо введено "ДД.ММ.ЯЯ"
+                date_val = datetime.strptime(x, "%d.%m.%Y").date()
+            else:
+                return None  # Неверный формат
             if date_val >= datetime.now().date():
-                log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯЯЯ' — дата {date_val.strftime('%d.%m.%Y')}")
+                log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
                 return date_val
             else:
                 log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
@@ -160,7 +165,6 @@ def free_60(d, t):
 async def free_slots_async(d):
     try:
         loop = asyncio.get_event_loop()
-        # Очищаємо кеш для нової дати
         ds = d.strftime("%Y-%m-%d")
         if ds in cache:
             del cache[ds]
@@ -188,7 +192,7 @@ def cancel_record(cid):
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
             event_id = last_rec[cid]["event_id"]
-            dt = datetime.strptime(last_rec[cid]["full_dt"], "%d.%m %H:%M").replace(tzinfo=LOCAL)
+            dt = datetime.strptime(last_rec[cid]["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
             service.events().delete(calendarId=CAL_ID, eventId=event_id).execute()
             with lock:
                 ds = dt.date().strftime("%Y-%m-%d")
@@ -285,7 +289,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Фільтр спаму: Ігноруємо повідомлення з шкідливими посиланнями
     if "ordershunter.ru" in text.lower() or "premium_gift" in text.lower():
         log.warning(f"Ігноруємо спам від {chat_id}: '{text}'")
-        return  # Не обробляємо спам
+        return
 
     # Опис бота при першому оновленні або після завершення
     if chat_id not in show_welcome:
@@ -294,7 +298,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Оберіть 'Записатися на ЕКГ', щоб почати, або 'Скасувати запис', якщо потрібно скасувати попередній запис."
         )
         await msg.reply_text(bot_description, reply_markup=main_kb)
-        show_welcome[chat_id] = True  # Позначаємо, що опис показано
+        show_welcome[chat_id] = True
 
     if text == "Скасувати":
         u.pop(chat_id, None)
@@ -305,7 +309,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Скасувати запис":
         if cancel_record(chat_id):
             await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
-            show_welcome[chat_id] = False  # Скидаємо, щоб опис з’являвся знову
+            show_welcome[chat_id] = False
         else:
             await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
         log.info(f"Скасування запису для {chat_id}")
@@ -315,7 +319,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         log.info(f"Користувач {chat_id} почав запис")
-        show_welcome[chat_id] = False  # Скидаємо після початку
+        show_welcome[chat_id] = False
         return
 
     if chat_id not in u:
@@ -371,7 +375,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
                 log.error(f"free_slots_async: Помилка отримання слотів для {date_val}: {e}")
         else:
-            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯЯЯ", reply_markup=date_kb())
+            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ", reply_markup=date_kb())
             log.warning(f"v_date: Невірна дата від {chat_id}")
 
     if step == "time":
@@ -388,8 +392,8 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС!\n{conf}")
                 if add_event({**data, "time": time_val, "cid": chat_id, "full": full}):
                     add_sheet({**data, "full": full})
-                    u.pop(chat_id, None)  # Видаляємо користувача після запису
-                    show_welcome[chat_id] = True  # Встановлюємо стан для показу опису при наступному вході
+                    u.pop(chat_id, None)
+                    show_welcome[chat_id] = True
                     log.info(f"Запис завершено для {chat_id}")
             else:
                 await msg.reply_text("Зайнято (±30 хв)", reply_markup=cancel_kb)
