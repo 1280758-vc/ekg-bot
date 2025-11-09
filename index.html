@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date input enforcement)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date validation)
 import os
 import re
 import logging
@@ -94,18 +94,19 @@ def v_date(x):
     else:
         try:
             if " – " in x:
-                x = x.split(" – ")[0]  # Беремо тільки дату перед " – "
-            if len(x.split('.')) == 3:
+                x = x.split(" – ")[0]
+            if len(x.split('.')) == 3:  # Тільки формат з роком
                 if len(x.split('.')[2]) == 2:
-                    x = x + str(current_year)[2:]  # Додаємо повний рік, якщо введено "ДД.ММ.ЯЯ"
+                    x = x + str(current_year)[2:]  # Додаємо повний рік для "ДД.ММ.ЯЯ"
                 date_val = datetime.strptime(x, "%d.%m.%Y").date()
+                if date_val >= datetime.now().date():
+                    log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
+                    return date_val
+                else:
+                    log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
+                    return None
             else:
-                return None  # Неверный формат
-            if date_val >= datetime.now().date():
-                log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
-                return date_val
-            else:
-                log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
+                log.error(f"v_date: Невірний формат дати '{x}', потрібен рік')
                 return None
         except ValueError as e:
             log.error(f"v_date: Помилка парсингу дати '{x}': {e}")
