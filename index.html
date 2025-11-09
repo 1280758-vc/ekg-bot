@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date validation)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fixed date and slots logic)
 import os
 import re
 import logging
@@ -57,9 +57,9 @@ cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize
 gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
 
 def date_kb():
-    today = datetime.now().strftime("%d.%m – Сьогодні")
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m – Завтра")
-    day_after = (datetime.now() + timedelta(days=2)).strftime("%d.%m – Післязавтра")
+    today = datetime.now().strftime("%d.%m.%Y – Сьогодні")
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y – Завтра")
+    day_after = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y – Післязавтра")
     return ReplyKeyboardMarkup([
         [KeyboardButton(today), KeyboardButton(tomorrow)],
         [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ)")],
@@ -79,15 +79,15 @@ def v_date(x):
     log.info(f"v_date: Вхідний текст '{x}'")
     x = x.strip()
     current_year = datetime.now().year
-    if "Сьогодні" in x or x.startswith(datetime.now().strftime("%d.%m")):
+    if "Сьогодні" in x:
         date_val = datetime.now().date()
         log.info(f"v_date: Вибрано 'Сьогодні' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
-    elif "Завтра" in x or x.startswith((datetime.now() + timedelta(days=1)).strftime("%d.%m")):
+    elif "Завтра" in x:
         date_val = (datetime.now() + timedelta(days=1)).date()
         log.info(f"v_date: Вибрано 'Завтра' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
-    elif "Післязавтра" in x or x.startswith((datetime.now() + timedelta(days=2)).strftime("%d.%m")):
+    elif "Післязавтра" in x:
         date_val = (datetime.now() + timedelta(days=2)).date()
         log.info(f"v_date: Вибрано 'Післязавтра' — дата {date_val.strftime('%d.%m.%Y')}")
         return date_val
@@ -96,8 +96,9 @@ def v_date(x):
             if " – " in x:
                 x = x.split(" – ")[0]
             if len(x.split('.')) == 3:  # Тільки формат з роком
-                if len(x.split('.')[2]) == 2:
-                    x = x + str(current_year)[2:]  # Додаємо повний рік для "ДД.ММ.ЯЯ"
+                year_part = x.split('.')[2]
+                if len(year_part) == 2:
+                    x = f"{x}.{current_year}"  # Додаємо повний рік для "ДД.ММ.ЯЯ"
                 date_val = datetime.strptime(x, "%d.%m.%Y").date()
                 if date_val >= datetime.now().date():
                     log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
@@ -106,7 +107,7 @@ def v_date(x):
                     log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
                     return None
             else:
-                log.error(f"v_date: Невірний формат дати '{x}', потрібен рік')
+                log.error(f"v_date: Невірний формат дати '{x}', потрібен рік")
                 return None
         except ValueError as e:
             log.error(f"v_date: Помилка парсингу дати '{x}': {e}")
