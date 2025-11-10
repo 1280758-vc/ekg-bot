@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fully fixed date validation and buttons)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fully fixed date validation and slots)
 import os
 import re
 import logging
@@ -95,10 +95,12 @@ def v_date(x):
         try:
             if " – " in x:
                 x = x.split(" – ")[0]
-            if len(x.split('.')) == 3:  # Тільки формат з роком
-                year_part = x.split('.')[2]
+            parts = x.split('.')
+            if len(parts) == 3:
+                year_part = parts[2]
                 if len(year_part) == 2:
-                    x = f"{x[:6]}{current_year}"  # Додаємо повний рік для "ДД.ММ.ЯЯ"
+                    full_year = current_year // 100 * 100 + int(year_part) if int(year_part) > current_year % 100 else current_year // 100 * 100 + 1900 + int(year_part)
+                    x = f"{parts[0]}.{parts[1]}.{full_year}"
                 date_val = datetime.strptime(x, "%d.%m.%Y").date()
                 if date_val >= datetime.now().date():
                     log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
@@ -201,7 +203,7 @@ def cancel_record(cid):
                     booked_slots[ds].remove(dt)
                     if not booked_slots[ds]:
                         del booked_slots[ds]
-            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}")
+            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано запис: {last_rec[cid]['full_dt']}"))
             last_rec.pop(cid, None)
             return True
         except Exception as e:
@@ -360,7 +362,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "date":
         if text == "Інша дата (ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ)":
-            await msg.reply_text("Введіть дату у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 10.11.25):", reply_markup=cancel_kb)
+            await msg.reply_text("Введіть дату у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 11.11.25):", reply_markup=cancel_kb)
             return
         date_val = v_date(text)
         log.debug(f"Валідація дати: '{text}' → {date_val}")
@@ -379,7 +381,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("Помилка при отриманні слотів. Спробуйте пізніше.", reply_markup=date_kb())
                 log.error(f"free_slots_async: Помилка отримання слотів для {date_val}: {e}")
         else:
-            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 10.11.25)", reply_markup=cancel_kb)
+            await msg.reply_text("Невірна дата, введіть у форматі ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ (наприклад, 11.11.25)", reply_markup=cancel_kb)
             log.warning(f"v_date: Невірна дата від {chat_id}")
 
     if step == "time":
