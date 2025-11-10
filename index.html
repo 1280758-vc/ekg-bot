@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fully fixed date validation)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 + fully fixed date validation and buttons)
 import os
 import re
 import logging
@@ -98,7 +98,7 @@ def v_date(x):
             if len(x.split('.')) == 3:  # Тільки формат з роком
                 year_part = x.split('.')[2]
                 if len(year_part) == 2:
-                    x = f"{x}.{current_year}"  # Додаємо повний рік для "ДД.ММ.ЯЯ"
+                    x = f"{x[:6]}{current_year}"  # Додаємо повний рік для "ДД.ММ.ЯЯ"
                 date_val = datetime.strptime(x, "%d.%m.%Y").date()
                 if date_val >= datetime.now().date():
                     log.info(f"v_date: Оброблено 'ДД.ММ.ЯЯ(ЯЯ)' — дата {date_val.strftime('%d.%m.%Y')}")
@@ -106,9 +106,8 @@ def v_date(x):
                 else:
                     log.warning(f"v_date: Дата {date_val.strftime('%d.%m.%Y')} в минулому")
                     return None
-            else:
-                log.error(f"v_date: Невірний формат дати '{x}', потрібен рік")
-                return None
+            log.error(f"v_date: Невірний формат дати '{x}', потрібен рік (ДД.ММ.ЯЯ або ДД.ММ.ЯЯЯЯ)")
+            return None
         except ValueError as e:
             log.error(f"v_date: Помилка парсингу дати '{x}': {e}")
             return None
