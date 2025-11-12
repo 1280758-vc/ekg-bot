@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 — ФІНАЛЬНА ВЕРСІЯ, 11.11.2025)
+# bot.py — WEBHOOK + FastAPI + Render (v21.5 — ВИПРАВЛЕНА ВЕРСІЯ, 12.11.2025)
 import os
 import re
 import logging
