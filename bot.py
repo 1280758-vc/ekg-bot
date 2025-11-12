@@ -1,8 +1,8 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.5 — ВИПРАВЛЕНА ВЕРСІЯ, 12.11.2025)
+# bot.py — WEBHOOK + FastAPI + Render (v21.6 — ВИПРАВЛЕНА ВЕРСІЯ, 12.11.2025)
 import os
 import re
 import logging
-import time  # Додано для time.time()
+import time
 from datetime import datetime, timedelta
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -125,11 +125,11 @@ async def get_events(d):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, get_events_async, d)
 
-def free_60(d, t):
+async def free_60(d, t):
     dt = datetime.combine(d, t).replace(tzinfo=LOCAL)
     start_check = dt - timedelta(minutes=60)
     end_check = dt + timedelta(minutes=60)
-    asyncio.run(get_events(d))
+    await get_events(d)
     events = cache.get(d.strftime("%Y-%m-%d"), [{}])[0]
     with lock:
         for booked_dt in booked_slots.get(d.strftime("%Y-%m-%d"), []):
@@ -349,7 +349,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_val = datetime.strptime(text.strip(), "%H:%M").time()
             if not ("09:00" <= text <= "18:00"):
                 raise ValueError
-            if await asyncio.to_thread(free_60, data["date"], time_val):
+            if await free_60(data["date"], time_val):
                 full = f"{data['date'].strftime('%d.%m.%Y')} {text}"
                 conf = f"Запис підтверджено!\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
                 await msg.reply_text(conf, reply_markup=main_kb)
