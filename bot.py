@@ -2,6 +2,7 @@
 import os
 import re
 import logging
+import time  # Додано для time.time()
 from datetime import datetime, timedelta
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -335,6 +336,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             slots = await free_slots_async(date_val)
             if not slots:
                 await msg.reply_text(f"На {date_val.strftime('%d.%m.%Y')} вільних 60-хвилинних слотів немає.", reply_markup=date_kb())
+                data["step"] = "date"  # Повертаємо до вибору дати
             else:
                 await msg.reply_text(f"Вільно {date_val.strftime('%d.%m.%Y')} (60 хв):\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВиберіть час:", reply_markup=cancel_kb)
             log.info(f"process_update: Дата {chat_id}: {date_val.strftime('%d.%m.%Y')}, слоти {slots}")
