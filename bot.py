@@ -1,4 +1,4 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.6 — ВИПРАВЛЕНА ВЕРСІЯ, 12.11.2025)
+# bot.py — WEBHOOK + FastAPI + Render (v21.7 — ВИПРАВЛЕННЯ СЛОТІВ, 12.11.2025)
 import os
 import re
 import logging
@@ -156,12 +156,14 @@ async def free_slots_async(d):
         ds = d.strftime("%Y-%m-%d")
         if ds in cache: del cache[ds]
         log.info(f"free_slots: Очищено кеш {ds}")
-        slots = await loop.run_in_executor(executor, lambda: [
-            cur.strftime("%H:%M") for cur in (
-                datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()),
-                *[cur + timedelta(minutes=60) for cur in [datetime.combine(d, datetime.strptime("09:00", "%H:%M").time()) for _ in range(9)][1:]]
-            ) if cur <= datetime.combine(d, datetime.strptime("18:00", "%H:%M").time()) and asyncio.run_coroutine_threadsafe(free_60(d, cur.time()), loop).result()
-        ])
+        start_time = datetime.strptime("09:00", "%H:%M").time()
+        slots = []
+        current = datetime.combine(d, start_time)
+        end_time = datetime.strptime("18:00", "%H:%M").time()
+        while current <= datetime.combine(d, end_time):
+            if await free_60(d, current.time()):
+                slots.append(current.strftime("%H:%M"))
+            current += timedelta(hours=1)
         log.info(f"free_slots: {d.strftime('%d.%m.%Y')} — {slots}")
         return slots if slots else []
     except Exception as e:
