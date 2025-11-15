@@ -1,4 +1,3 @@
-# bot.py — WEBHOOK + FastAPI + Render (v21.7 — ВИПРАВЛЕННЯ СЛОТІВ, 12.11.2025)
 import os
 import re
 import logging
@@ -46,9 +45,9 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 # КЛАВІАТУРИ
 main_kb = ReplyKeyboardMarkup([
-    [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")]
+    [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")],
+    [KeyboardButton("Список записів")]
 ], resize_keyboard=True)
-
 cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize_keyboard=True)
 gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
 
@@ -171,20 +170,33 @@ async def free_slots_async(d):
         return []
 
 # СКАСУВАННЯ
-def cancel_record(cid):
-    if cid in last_rec and os.path.exists(CREDS_C):
+def cancel_record(chat_id, record_id=None):
+    if chat_id in last_rec:
+        if record_id and record_id not in [r["event_id"] for r in last_rec[chat_id].values()]:
+            return False
+        if not os.path.exists(CREDS_C):
+            return False
         try:
             service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
-            event_id = last_rec[cid]["event_id"]
-            dt = datetime.strptime(last_rec[cid]["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
+            if record_id:
+                event_to_delete = next((r for r in last_rec[chat_id].values() if r["event_id"] == record_id), None)
+                if not event_to_delete:
+                    return False
+                event_id = event_to_delete["event_id"]
+                dt = datetime.strptime(event_to_delete["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
+                last_rec[chat_id] = {k: v for k, v in last_rec[chat_id].items() if v["event_id"] != record_id}
+            else:
+                event_id = list(last_rec[chat_id].values())[0]["event_id"]
+                dt = datetime.strptime(list(last_rec[chat_id].values())[0]["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
+                last_rec.pop(chat_id, None)
             service.events().delete(calendarId=CAL_ID, eventId=event_id).execute()
             with lock:
                 ds = dt.date().strftime("%Y-%m-%d")
                 if ds in booked_slots:
                     booked_slots[ds].remove(dt)
-                    if not booked_slots[ds]: del booked_slots[ds]
-            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано: {last_rec[cid]['full_dt']}"))
-            last_rec.pop(cid, None)
+                    if not booked_slots[ds]:
+                        del booked_slots[ds]
+            asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано: {dt.strftime('%d.%m.%Y %H:%M')}"))
             return True
         except Exception as e:
             log.error(f"cancel_record: {e}")
@@ -192,7 +204,8 @@ def cancel_record(cid):
 
 # ЗАПИС
 def init_sheet():
-    if not os.path.exists(CREDS_S): return
+    if not os.path.exists(CREDS_S):
+        return
     try:
         service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
         values = service.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="A1:H1").execute().get("values", [])
@@ -205,32 +218,37 @@ def init_sheet():
         log.error(f"init_sheet: {e}")
 
 def add_sheet(data):
-    if not os.path.exists(CREDS_S): return
+    if not os.path.exists(CREDS_S):
+        return
     try:
-        build("sheets","v4",credentials=Credentials.from_service_account_file(CREDS_S,scopes=SCOPES)).spreadsheets().values().append(
+        build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
-            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
+            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email", ""), data["addr"], data["full"]]]}
         ).execute()
     except Exception as e:
         log.error(f"add_sheet: {e}")
 
 def add_event(data):
-    if not os.path.exists(CREDS_C): return False
+    if not os.path.exists(CREDS_C):
+        return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
-        service = build("calendar","v3",credentials=Credentials.from_service_account_file(CREDS_C,scopes=SCOPES))
+        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
         event = service.events().insert(calendarId=CAL_ID, body={
             "summary": f"ЕКГ: {data['pib']} ({data['phone']})",
             "location": data["addr"],
-            "description": f"Email: {data.get('email','—')}\nР.н.: {data['year']}\nСтать: {data['gender']}\nChat ID: {data['cid']}",
+            "description": f"Email: {data.get('email', '—')}\nР.н.: {data['year']}\nСтать: {data['gender']}\nChat ID: {data['cid']}",
             "start": {"dateTime": (dt - timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"},
             "end": {"dateTime": (dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"}
         }).execute()
         with lock:
             ds = data["date"].strftime("%Y-%m-%d")
-            if ds not in booked_slots: booked_slots[ds] = []
+            if ds not in booked_slots:
+                booked_slots[ds] = []
             booked_slots[ds].append(dt)
-        last_rec[data['cid']] = {"event_id": event["id"], "full_dt": data["full"]}
+        if data["cid"] not in last_rec:
+            last_rec[data["cid"]] = {}
+        last_rec[data["cid"]][event["id"]] = {"event_id": event["id"], "full_dt": data["full"]}
         return True
     except Exception as e:
         log.error(f"add_event: {e}")
@@ -241,7 +259,8 @@ def add_event(data):
 async def check_reminders():
     now = datetime.now(LOCAL)
     for day in [now.date(), (now + timedelta(days=1)).date()]:
-        for e in await get_events(day):
+        events = await get_events(day)
+        for e in events:
             try:
                 start_str = e["start"]["dateTime"]
                 start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")).astimezone(LOCAL)
@@ -251,11 +270,13 @@ async def check_reminders():
                     desc = e.get("description", "")
                     cid_match = re.search(r"Chat ID: (\d+)", desc)
                     cid = int(cid_match.group(1)) if cid_match else None
-                    msg = f"НАГАДУВАННЯ!\nЕКГ через {mins_left} хв\n{e['summary']}\nЧас: {start_dt.strftime('%H:%M')}"
-                    if cid: await application.bot.send_message(cid, msg)
+                    msg = f"🔔 НАГАДУВАННЯ!\nЕКГ через {mins_left} хв\nДата: {start_dt.strftime('%d.%m.%Y')}\nЧас: {start_dt.strftime('%H:%M')}\n{e['summary']}"
+                    if cid:
+                        await application.bot.send_message(cid, msg)
                     await application.bot.send_message(ADMIN_ID, f"НАГАДУВАННЯ:\n{msg}")
                     reminded.add((eid, mins_left))
-            except: continue
+            except Exception:
+                continue
 
 # ОБРОБКА
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,41 +288,56 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat_id
     text = msg.text.strip() if msg.text else ""
     log.info(f"process_update: {chat_id}: '{text}'")
-
     if chat_id not in show_welcome:
         await msg.reply_text(
             "Цей бот для запису на ЕКГ вдома.\n"
-            "Оберіть 'Записатися на ЕКГ' або 'Скасувати запис'.",
+            "Оберіть 'Записатися на ЕКГ', 'Скасувати запис' або 'Список записів'.",
             reply_markup=main_kb
         )
         show_welcome[chat_id] = True
         log.info(f"process_update: Вітання для {chat_id}")
-
     if text == "Скасувати":
         u.pop(chat_id, None)
         await msg.reply_text("Скасовано.", reply_markup=main_kb)
         return
-
     if text == "Скасувати запис":
-        if cancel_record(chat_id):
-            await msg.reply_text("Запис скасовано!", reply_markup=main_kb)
+        data = last_rec.get(chat_id, {})
+        if not data:
+            await msg.reply_text("У вас немає активних записів.", reply_markup=main_kb)
+            return
+        reply_text = "Ваші записи:\n"
+        for i, (event_id, record) in enumerate(data.items(), 1):
+            reply_text += f"{i}. {record['event_id']}: {record['full_dt']}\n"
+        reply_text += "Введи ID запису для скасування (наприклад, <event_id>):"
+        await msg.reply_text(reply_text, reply_markup=cancel_kb)
+        return
+    if text and chat_id in last_rec and any(text == r["event_id"] for r in last_rec[chat_id].values()):
+        if cancel_record(chat_id, text):
+            await msg.reply_text(f"Запис {text} скасовано!", reply_markup=main_kb)
             show_welcome[chat_id] = False
         else:
-            await msg.reply_text("Запис не знайдено", reply_markup=main_kb)
+            await msg.reply_text("Помилка скасування.", reply_markup=main_kb)
         return
-
+    if text == "/list" or text == "Список записів":
+        data = last_rec.get(chat_id, {})
+        if not data:
+            await msg.reply_text("У вас немає активних записів.", reply_markup=main_kb)
+            return
+        reply_text = "Ваші записи:\n"
+        for i, (event_id, record) in enumerate(data.items(), 1):
+            reply_text += f"{i}. {record['event_id']}: {record['full_dt']}\n"
+        await msg.reply_text(reply_text, reply_markup=main_kb)
+        return
     if text in ["/start", "Записатися на ЕКГ"]:
         u[chat_id] = {"step": "pib", "cid": chat_id}
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         show_welcome[chat_id] = False
         return
-
     if chat_id not in u:
         log.warning(f"process_update: Невідомий чат {chat_id}")
         return
     data = u[chat_id]
     step = data["step"]
-
     steps = {
         "pib": (v_pib, "gender", "Стать:", gender_kb),
         "gender": (v_gender, "year", "Рік народження:", cancel_kb),
@@ -310,7 +346,6 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "email": (v_email, "addr", "Адреса:", cancel_kb),
         "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
     }
-
     if step in steps:
         val = steps[step][0](text)
         if val is not None:
@@ -326,7 +361,6 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await msg.reply_text("Невірно", reply_markup=cancel_kb)
         return
-
     if step == "date":
         if text == "Інша дата (ДД.ММ.ЯЯЯЯ)":
             await msg.reply_text("Введіть дату у форматі ДД.ММ.ЯЯЯЯ (наприклад, 12.11.2025):", reply_markup=cancel_kb)
@@ -345,7 +379,6 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.reply_text("Невірний формат. Введіть ДД.ММ.ЯЯЯЯ (наприклад, 12.11.2025)", reply_markup=cancel_kb)
         return
-
     if step == "time":
         try:
             time_val = datetime.strptime(text.strip(), "%H:%M").time()
@@ -353,7 +386,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError
             if await free_60(data["date"], time_val):
                 full = f"{data['date'].strftime('%d.%m.%Y')} {text}"
-                conf = f"Запис підтверджено!\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nЧас: {full} (±30 хв)"
+                conf = f"Запис підтверджено!\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nДата і час: {full} (±30 хв)"
                 await msg.reply_text(conf, reply_markup=main_kb)
                 await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС:\n{conf}")
                 add_event({**data, "time": time_val, "cid": chat_id, "full": full})
