@@ -15,6 +15,7 @@ import threading
 from contextlib import asynccontextmanager
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, ContextTypes
+import unicodedata
 
 # НАЛАШТУВАННЯ
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -67,7 +68,8 @@ email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити ⏭️")]]
 
 # ВАЛІДАЦІЯ
 v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
-v_gender = lambda x: x if re.sub(r'[^\w\s]', '', x) in ["Чоловіча", "Жіноча"] else None
+v_gender = lambda x: "Чоловіча" if unicodedata.normalize("NFKD", x).encode("ASCII", "ignore").decode("ASCII").strip() == "Чоловіча" else \
+                    "Жіноча" if unicodedata.normalize("NFKD", x).encode("ASCII", "ignore").decode("ASCII").strip() == "Жіноча" else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
 v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None
