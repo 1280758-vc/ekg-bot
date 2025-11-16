@@ -46,7 +46,8 @@ application = Application.builder().token(BOT_TOKEN).build()
 # КЛАВІАТУРИ
 main_kb = ReplyKeyboardMarkup([
     [KeyboardButton("Записатися на ЕКГ 🎉"), KeyboardButton("Скасувати запис ❌")],
-    [KeyboardButton("Список записів 📋"), KeyboardButton("Повторити запис 🔄")]
+    [KeyboardButton("Список записів 📋"), KeyboardButton("Повторити запис 🔄")],
+    [KeyboardButton("Редагувати запис ✏️")]
 ], resize_keyboard=True)
 cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати ❌")]], resize_keyboard=True)
 gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча 🧑"), KeyboardButton("Жіноча 👩")]], resize_keyboard=True)
@@ -66,7 +67,7 @@ email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити ⏭️")]]
 
 # ВАЛІДАЦІЯ
 v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
-v_gender = lambda x: x if x in ["Чоловіча","Жіноча"] else None
+v_gender = lambda x: x if re.sub(r'[^\w\s]', '', x) in ["Чоловіча", "Жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
 v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None
@@ -200,6 +201,62 @@ def cancel_record(chat_id, record_code=None):
             log.error(f"cancel_record: {e}")
     return False
 
+# РЕДАГУВАННЯ
+def update_event(chat_id, record_code, new_data):
+    if chat_id not in last_rec or not any(r["record_code"] == record_code for r in last_rec[chat_id].values()):
+        return False
+    event_to_update = next(r for r in last_rec[chat_id].values() if r["record_code"] == record_code)
+    event_id = event_to_update["event_id"]
+    old_dt = datetime.strptime(event_to_update["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
+    new_dt = datetime.combine(new_data["date"], new_data["time"]).replace(tzinfo=LOCAL)
+
+    if not os.path.exists(CREDS_C):
+        return False
+    try:
+        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
+        event = service.events().get(calendarId=CAL_ID, eventId=event_id).execute()
+        event["summary"] = f"ЕКГ: {new_data['pib']} ({new_data['phone']})"
+        event["location"] = new_data["addr"]
+        event["description"] = f"Email: {new_data.get('email', '—')}\nР.н.: {new_data['year']}\nСтать: {new_data['gender']}\nChat ID: {chat_id}"
+        event["start"]["dateTime"] = (new_dt - timedelta(minutes=30)).isoformat()
+        event["end"]["dateTime"] = (new_dt + timedelta(minutes=30)).isoformat()
+        service.events().update(calendarId=CAL_ID, eventId=event_id, body=event).execute()
+
+        with lock:
+            ds_old = old_dt.date().strftime("%Y-%m-%d")
+            if ds_old in booked_slots:
+                booked_slots[ds_old].remove(old_dt)
+                if not booked_slots[ds_old]:
+                    del booked_slots[ds_old]
+            ds_new = new_dt.date().strftime("%Y-%m-%d")
+            if ds_new not in booked_slots:
+                booked_slots[ds_new] = []
+            booked_slots[ds_new].append(new_dt)
+
+        full = f"{new_data['date'].strftime('%d.%m.%Y')} {new_data['time'].strftime('%H:%M')}"
+        event_to_update["full_dt"] = full
+        return True
+    except Exception as e:
+        log.error(f"update_event: {e}")
+        return False
+
+def update_sheet(data, record_code):
+    if not os.path.exists(CREDS_S):
+        return
+    try:
+        service = build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES))
+        sheet = service.spreadsheets()
+        values = sheet.values().get(spreadsheetId=SHEET_ID, range="A2:H").execute().get("values", [])
+        for i, row in enumerate(values, 2):
+            if len(row) > 7 and row[7] and re.search(rf"REC-{record_code.split('-')[1]}", row[7]):
+                sheet.values().update(
+                    spreadsheetId=SHEET_ID, range=f"A{i}:H{i}", valueInputOption="RAW",
+                    body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email", ""), data["addr"], data["full"]]]}
+                ).execute()
+                break
+    except Exception as e:
+        log.error(f"update_sheet: {e}")
+
 # ЗАПИС
 def init_sheet():
     if not os.path.exists(CREDS_S):
@@ -307,7 +364,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "Ваші записи:\n"
         for i, (event_id, record) in enumerate(data.items(), 1):
             reply_text += f"{i}. ID запису: {record['record_code']} - {record['full_dt']}\n"
-        reply_text += "Введи ID запису для скасування (наприклад, REC-20251115-1050):"
+        reply_text += "Введи ID запису для скасування (наприклад, REC-20251116-1532):"
         await msg.reply_text(reply_text, reply_markup=cancel_kb)
         return
     if text and chat_id in last_rec and any(text == r["record_code"] for r in last_rec[chat_id].values()):
@@ -316,6 +373,35 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             show_welcome[chat_id] = False
         else:
             await msg.reply_text("Помилка скасування. 😞", reply_markup=main_kb)
+        return
+    if text == "Редагувати запис ✏️":
+        data = last_rec.get(chat_id, {})
+        if not data:
+            await msg.reply_text("У вас немає активних записів для редагування. 📭", reply_markup=main_kb)
+            return
+        reply_text = "Ваші записи:\n"
+        for i, (event_id, record) in enumerate(data.items(), 1):
+            reply_text += f"{i}. ID запису: {record['record_code']} - {record['full_dt']}\n"
+        reply_text += "Введи ID запису для редагування (наприклад, REC-20251116-1532):"
+        await msg.reply_text(reply_text, reply_markup=cancel_kb)
+        u[chat_id] = {"step": "edit_record", "cid": chat_id}
+        return
+    if text and chat_id in u and u[chat_id].get("step") == "edit_record" and any(text == r["record_code"] for r in last_rec[chat_id].values()):
+        record = next(r for r in last_rec[chat_id].values() if r["record_code"] == text)
+        dt = datetime.strptime(record["full_dt"], "%d.%m.%Y %H:%M")
+        u[chat_id] = {
+            "step": "edit_pib", "cid": chat_id,
+            "record_code": text,
+            "pib": record.get("pib", ""),
+            "gender": record.get("gender", ""),
+            "year": record.get("year", ""),
+            "phone": record.get("phone", ""),
+            "email": record.get("email", ""),
+            "addr": record.get("addr", ""),
+            "date": dt.date(),
+            "time": dt.time()
+        }
+        await msg.reply_text(f"Редагування запису з ID {text}.\nПІБ (Прізвище Ім'я По батькові): 👤\nПоточне значення: {record.get('pib', '—')}", reply_markup=cancel_kb)
         return
     if text == "/list" or text == "Список записів 📋":
         data = last_rec.get(chat_id, {})
@@ -332,7 +418,10 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("ПІБ (Прізвище Ім'я По батькові): 👤", reply_markup=cancel_kb)
         show_welcome[chat_id] = False
         return
-    if text == "Повторити запис 🔄" and chat_id in last_rec and last_rec[chat_id]:
+    if text == "Повторити запис 🔄":
+        if chat_id not in last_rec or not last_rec[chat_id]:
+            await msg.reply_text("Щоб повторити запис, спочатку зроби хоча б один запис! 📝", reply_markup=main_kb)
+            return
         last_record = list(last_rec[chat_id].values())[0]
         last_dt = datetime.strptime(last_record["full_dt"], "%d.%m.%Y %H:%M")
         last_date = last_dt.date()
@@ -359,22 +448,70 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "year": (v_year, "phone", "Телефон: 📞", cancel_kb),
         "phone": (v_phone, "email", "Email (необов'язково, введи символ або натисни 'Пропустити ⏭️'): ✉️", email_kb),
         "email": (v_email, "addr", "Адреса: 🏠", cancel_kb),
-        "addr": (lambda x: x.strip(), "date", "Дата: 📅", date_kb())
+        "addr": (lambda x: x.strip(), "date", "Дата: 📅", date_kb()),
+        "edit_pib": (v_pib, "edit_gender", "Стать: 🧑👩", gender_kb),
+        "edit_gender": (v_gender, "edit_year", "Рік народження: 📅", cancel_kb),
+        "edit_year": (v_year, "edit_phone", "Телефон: 📞", cancel_kb),
+        "edit_phone": (v_phone, "edit_email", "Email (необов'язково, введи символ або натисни 'Пропустити ⏭️'): ✉️", email_kb),
+        "edit_email": (v_email, "edit_addr", "Адреса: 🏠", cancel_kb),
+        "edit_addr": (lambda x: x.strip(), "edit_date", "Дата: 📅", date_kb())
     }
     if step in steps:
         val = steps[step][0](text)
         if val is not None:
-            data[step] = val
+            data[step.replace("edit_", "")] = val
             data["step"] = steps[step][1]
-            await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
+            if step.startswith("edit_"):
+                current = data.get(step.replace("edit_", ""), "—")
+                await msg.reply_text(f"{steps[step][2]}\nПоточне значення: {current}", reply_markup=steps[step][3])
+            else:
+                await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
             log.info(f"process_update: Крок {chat_id}: {steps[step][1]}")
         else:
-            if step == "email" and (text == "" or text == "Пропустити ⏭️"):
-                data[step] = ""
-                data["step"] = "addr"
-                await msg.reply_text("Адреса: 🏠", reply_markup=cancel_kb)
+            if step in ["edit_email", "email"] and (text == "" or text == "Пропустити ⏭️"):
+                data[step.replace("edit_", "")] = ""
+                data["step"] = steps[step][1]
+                await msg.reply_text(f"Адреса: 🏠\nПоточне значення: {data.get('addr', '—')}", reply_markup=cancel_kb)
             else:
                 await msg.reply_text("Невірно. 😞", reply_markup=cancel_kb)
+        return
+    if step == "edit_date":
+        if text == "Інша дата (ДД.ММ.ЯЯЯЯ) 📅":
+            await msg.reply_text("Введи дату у форматі ДД.ММ.ЯЯЯЯ (наприклад, 12.11.2025): 📅", reply_markup=cancel_kb)
+            return
+        date_val = v_date(text)
+        if date_val:
+            data["date"] = date_val
+            data["step"] = "edit_time"
+            slots = await free_slots_async(date_val)
+            if not slots:
+                await msg.reply_text(f"На {date_val.strftime('%d.%m.%Y')} вільних 60-хвилинних слотів немає. 📭", reply_markup=date_kb())
+                data["step"] = "edit_date"
+            else:
+                await msg.reply_text(f"Вільно {date_val.strftime('%d.%m.%Y')} (60 хв): 📅\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВибери час: ⏰\nПоточне значення: {data['time'].strftime('%H:%M')}", reply_markup=cancel_kb)
+            log.info(f"process_update: Дата {chat_id}: {date_val.strftime('%d.%m.%Y')}, слоти {slots}")
+        else:
+            await msg.reply_text("Невірний формат. Введи ДД.ММ.ЯЯЯЯ (наприклад, 12.11.2025). 📅", reply_markup=cancel_kb)
+        return
+    if step == "edit_time":
+        try:
+            time_val = datetime.strptime(text.strip(), "%H:%M").time()
+            if not ("09:00" <= text <= "18:00"):
+                raise ValueError
+            if await free_60(data["date"], time_val):
+                full = f"{data['date'].strftime('%d.%m.%Y')} {time_val.strftime('%H:%M')}"
+                conf = f"Запис оновлено! ✅\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТел: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\n📅 Дата і час: {full} (±30 хв)"
+                await msg.reply_text(conf, reply_markup=main_kb)
+                await application.bot.send_message(ADMIN_ID, f"🔔 ОНОВЛЕНО ЗАПИС:\n{conf}")
+                update_event(chat_id, data["record_code"], data)
+                update_sheet(data, data["record_code"])
+                u.pop(chat_id, None)
+                show_welcome[chat_id] = True
+                log.info(f"process_update: Редагування {chat_id}: {full}")
+            else:
+                await msg.reply_text("Цей час зайнятий (±60 хв). Обери інший. 📅", reply_markup=cancel_kb)
+        except ValueError:
+            await msg.reply_text("Формат: ЧЧ:ХХ (09:00–18:00). ⏰", reply_markup=cancel_kb)
         return
     if step == "date":
         if text == "Інша дата (ДД.ММ.ЯЯЯЯ) 📅":
@@ -387,7 +524,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             slots = await free_slots_async(date_val)
             if not slots:
                 await msg.reply_text(f"На {date_val.strftime('%d.%m.%Y')} вільних 60-хвилинних слотів немає. 📭", reply_markup=date_kb())
-                data["step"] = "date"  # Повертаємо до вибору дати
+                data["step"] = "date"
             else:
                 await msg.reply_text(f"Вільно {date_val.strftime('%d.%m.%Y')} (60 хв): 📅\n" + "\n".join(f"• {s}" for s in slots) + "\n\nВибери час: ⏰", reply_markup=cancel_kb)
             log.info(f"process_update: Дата {chat_id}: {date_val.strftime('%d.%m.%Y')}, слоти {slots}")
