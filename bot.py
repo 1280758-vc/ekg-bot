@@ -428,16 +428,23 @@ async def lifespan(app: FastAPI):
         log.info(f"lifespan: Webhook успішно налаштовано: {url}")
     except Exception as e:
         log.error(f"lifespan: Помилка налаштування Webhook: {e}")
+    
+    # Запуск Uvicorn для прослуховування порту
+    port = int(os.getenv("PORT", 10000))
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    asyncio.create_task(server.serve())
+    log.info(f"lifespan: Сервер запущено на порту {port}")
+
     asyncio.create_task(reminder_loop())
-    # Додаємо цикл для утримання додатку живим
     while True:
         log.info("lifespan: Додаток активний, чекаю запитів...")
-        await asyncio.sleep(60)  # Утримуємо процес активним
+        await asyncio.sleep(60)
     yield
     await application.stop()
     await application.shutdown()
-
-app = FastAPI(lifespan=lifespan)
+    server.should_exit = True
+    await server.shutdown()
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -464,6 +471,5 @@ async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    log.info("main: Сервер стартує 🚀")
-    port = int(os.getenv("PORT", 10000))  # Отримуємо порт з змінної середовища
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Для локального тестування
+    uvicorn.run(app, host="0.0.0.0", port=10000)
