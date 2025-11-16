@@ -389,6 +389,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text and chat_id in u and u[chat_id].get("step") == "edit_record" and any(text == r["record_code"] for r in last_rec[chat_id].values()):
         record = next(r for r in last_rec[chat_id].values() if r["record_code"] == text)
         dt = datetime.strptime(record["full_dt"], "%d.%m.%Y %H:%M")
+        # Завантажуємо всі попередні дані для редагування
         u[chat_id] = {
             "step": "edit_pib", "cid": chat_id,
             "record_code": text,
@@ -424,13 +425,23 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         last_record = list(last_rec[chat_id].values())[0]
         last_dt = datetime.strptime(last_record["full_dt"], "%d.%m.%Y %H:%M")
-        last_date = last_dt.date()
-        last_time = last_dt.time()
-        u[chat_id] = {"step": "pib", "cid": chat_id, "date": last_date, "time": last_time, "is_repeat": True}
+        # Копіюємо всі дані, крім дати та часу
+        u[chat_id] = {
+            "step": "date", "cid": chat_id,
+            "pib": last_record.get("pib", ""),
+            "gender": last_record.get("gender", ""),
+            "year": last_record.get("year", ""),
+            "phone": last_record.get("phone", ""),
+            "email": last_record.get("email", ""),
+            "addr": last_record.get("addr", ""),
+            "is_repeat": True
+        }
         await msg.reply_text(
-            f"Повторний запис на 📅 {last_date.strftime('%d.%m.%Y')} ⏰ {last_time.strftime('%H:%M')}.\n"
-            "ПІБ (Прізвище Ім'я По батькові): 👤",
-            reply_markup=cancel_kb
+            f"Повторний запис з попередніми даними:\n"
+            f"ПІБ: {last_record.get('pib', '—')}\nСтать: {last_record.get('gender', '—')}\nР.н.: {last_record.get('year', '—')}\n"
+            f"Тел: {last_record.get('phone', '—')}\nEmail: {last_record.get('email', '—')}\nАдреса: {last_record.get('addr', '—')}\n"
+            "Вибери нову дату: 📅",
+            reply_markup=date_kb()
         )
         show_welcome[chat_id] = False
         return
@@ -446,29 +457,30 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "phone": (v_phone, "email", "Email (необов'язково, введи символ або натисни 'Пропустити ⏭️'): ✉️", email_kb),
         "email": (v_email, "addr", "Адреса: 🏠", cancel_kb),
         "addr": (lambda x: x.strip(), "date", "Дата: 📅", date_kb()),
-        "edit_pib": (v_pib, "edit_gender", "Стать: 🧑👩", gender_kb),
-        "edit_gender": (v_gender, "edit_year", "Рік народження: 📅", cancel_kb),
-        "edit_year": (v_year, "edit_phone", "Телефон: 📞", cancel_kb),
-        "edit_phone": (v_phone, "edit_email", "Email (необов'язково, введи символ або натисни 'Пропустити ⏭️'): ✉️", email_kb),
-        "edit_email": (v_email, "edit_addr", "Адреса: 🏠", cancel_kb),
-        "edit_addr": (lambda x: x.strip(), "edit_date", "Дата: 📅", date_kb())
+        "edit_pib": (v_pib, "edit_gender", "ПІБ (Прізвище Ім'я По батькові): 👤\nПоточне значення: {data['pib']}", cancel_kb),
+        "edit_gender": (v_gender, "edit_year", "Стать: 🧑👩\nПоточне значення: {data['gender']}", gender_kb),
+        "edit_year": (v_year, "edit_phone", "Рік народження: 📅\nПоточне значення: {data['year']}", cancel_kb),
+        "edit_phone": (v_phone, "edit_email", "Телефон: 📞\nПоточне значення: {data['phone']}", cancel_kb),
+        "edit_email": (v_email, "edit_addr", "Email (необов'язково, введи символ або натисни 'Пропустити ⏭️'): ✉️\nПоточне значення: {data['email']}", email_kb),
+        "edit_addr": (lambda x: x.strip(), "edit_date", "Адреса: 🏠\nПоточне значення: {data['addr']}", cancel_kb)
     }
     if step in steps:
         val = steps[step][0](text)
         if val is not None:
             data[step.replace("edit_", "")] = val
             data["step"] = steps[step][1]
+            prompt = steps[step][2].format(**data)
             if step.startswith("edit_"):
-                current = data.get(step.replace("edit_", ""), "—")
-                await msg.reply_text(f"{steps[step][2]}\nПоточне значення: {current}", reply_markup=steps[step][3])
+                await msg.reply_text(prompt, reply_markup=steps[step][3])
             else:
-                await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
+                await msg.reply_text(prompt, reply_markup=steps[step][3])
             log.info(f"process_update: Крок {chat_id}: {steps[step][1]}")
         else:
             if step in ["edit_email", "email"] and (text == "" or text == "Пропустити ⏭️"):
                 data[step.replace("edit_", "")] = ""
                 data["step"] = steps[step][1]
-                await msg.reply_text(f"Адреса: 🏠\nПоточне значення: {data.get('addr', '—')}", reply_markup=cancel_kb)
+                prompt = steps[step][2].format(**data)
+                await msg.reply_text(prompt, reply_markup=steps[step][3])
             else:
                 await msg.reply_text("Невірно. 😞", reply_markup=cancel_kb)
         return
@@ -546,7 +558,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 if data.get("is_repeat", False):
                     await msg.reply_text("Цей час зайнятий (±60 хв). Обери інший: ⏰", reply_markup=cancel_kb)
-                    data["step"] = "time"  # Залишаємо в стані вибору часу для повторного запису
+                    data["step"] = "time"
                 else:
                     await msg.reply_text("Цей час зайнятий (±60 хв). Обери інший. 📅", reply_markup=cancel_kb)
         except ValueError:
