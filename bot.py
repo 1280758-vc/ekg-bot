@@ -304,7 +304,17 @@ def add_event(data):
             booked_slots[ds].append(dt)
         if data["cid"] not in last_rec:
             last_rec[data["cid"]] = {}
-        last_rec[data["cid"]][event["id"]] = {"event_id": event["id"], "full_dt": data["full"], "record_code": record_code}
+        last_rec[data["cid"]][event["id"]] = {
+            "event_id": event["id"],
+            "full_dt": data["full"],
+            "record_code": record_code,
+            "pib": data["pib"],
+            "gender": data["gender"],
+            "year": data["year"],
+            "phone": data["phone"],
+            "email": data.get("email", ""),
+            "addr": data["addr"]
+        }
         return True
     except Exception as e:
         log.error(f"add_event: {e}")
