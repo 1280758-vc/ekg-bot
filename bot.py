@@ -15,7 +15,6 @@ import threading
 from contextlib import asynccontextmanager
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, ContextTypes
-import unicodedata
 
 # НАЛАШТУВАННЯ
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -68,8 +67,7 @@ email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити ⏭️")]]
 
 # ВАЛІДАЦІЯ
 v_pib = lambda x: " ".join(x.strip().split()) if len(p:=x.strip().split())==3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$",i) for i in p) else None
-v_gender = lambda x: "Чоловіча" if unicodedata.normalize("NFKD", x).encode("ASCII", "ignore").decode("ASCII").strip() == "Чоловіча" else \
-                    "Жіноча" if unicodedata.normalize("NFKD", x).encode("ASCII", "ignore").decode("ASCII").strip() == "Жіноча" else None
+v_gender = lambda x: re.sub(r'[^\w\s\u0400-\u04FF]', '', x).strip() if re.sub(r'[^\w\s\u0400-\u04FF]', '', x).strip() in ["Чоловіча", "Жіноча", "чоловіча", "жіноча"] else None
 v_year = lambda x: int(x) if x.isdigit() and 1900 <= int(x) <= datetime.now().year else None
 v_phone = lambda x: x.strip() if re.match(r"^(\+380|0)\d{9}$", x.replace(" ","")) else None
 v_email = lambda x: x.strip() if x == "" or re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", x) else None
@@ -366,7 +364,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "Ваші записи:\n"
         for i, (event_id, record) in enumerate(data.items(), 1):
             reply_text += f"{i}. ID запису: {record['record_code']} - {record['full_dt']}\n"
-        reply_text += "Введи ID запису для скасування (наприклад, REC-20251116-1532):"
+        reply_text += "Введи ID запису для скасування (наприклад, REC-20251116-1351):"
         await msg.reply_text(reply_text, reply_markup=cancel_kb)
         return
     if text and chat_id in last_rec and any(text == r["record_code"] for r in last_rec[chat_id].values()):
@@ -384,7 +382,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "Ваші записи:\n"
         for i, (event_id, record) in enumerate(data.items(), 1):
             reply_text += f"{i}. ID запису: {record['record_code']} - {record['full_dt']}\n"
-        reply_text += "Введи ID запису для редагування (наприклад, REC-20251116-1532):"
+        reply_text += "Введи ID запису для редагування (наприклад, REC-20251116-1351):"
         await msg.reply_text(reply_text, reply_markup=cancel_kb)
         u[chat_id] = {"step": "edit_record", "cid": chat_id}
         return
