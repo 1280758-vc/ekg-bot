@@ -12,7 +12,6 @@ import uvicorn
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from contextlib import asynccontextmanager
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, ContextTypes
 
@@ -38,7 +37,7 @@ executor = ThreadPoolExecutor(max_workers=2)
 lock = threading.Lock()
 
 # === Telegram Application ===
-application = Application.builder().token(BOT_TOKEN).build()
+application = Application.builder().token(BOT_TOKEN).concurrent_updates=True).build()
 
 # === Клавіатури ===
 main_kb = ReplyKeyboardMarkup([
@@ -125,4 +124,243 @@ async def is_slot_free(d, t):
 async def free_slots_async(d):
     ds = d.strftime("%Y-%m-%d")
     if ds in cache: del cache[ds]
-   
+    slots = []
+    current = datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
+    while current.time() <= datetime.strptime("18:00", "%H:%M").time():
+        if await is_slot_free(d, current.time()):
+            slots.append(current.strftime("%H:%M"))
+        current += timedelta(hours=1)
+    return slots
+
+# === СКАСУВАННЯ ===
+def cancel_record(chat_id, record_code):
+    if chat_id not in last_rec or record_code not in [r["record_code"] for r in last_rec[chat_id].values()]:
+        return False
+    record = next(r for r in last_rec[chat_id].values() if r["record_code"] == record_code)
+    event_id = record["event_id"]
+    dt = datetime.strptime(record["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
+    try:
+        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
+        service.events().delete(calendarId=CAL_ID, eventId=event_id).execute()
+        with lock:
+            ds = dt.date().strftime("%Y-%m-%d")
+            if ds in booked_slots and dt in booked_slots[ds]:
+                booked_slots[ds].remove(dt)
+                if not booked_slots[ds]: del booked_slots[ds]
+        del last_rec[chat_id][next(k for k, v in last_rec[chat_id].items() if v["record_code"] == record_code)]
+        if not last_rec[chat_id]: del last_rec[chat_id]
+        asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано: {dt.strftime('%d.%m.%Y %H:%M')}"))
+        return True
+    except Exception as e:
+        log.error(f"cancel_record: {e}")
+        return False
+
+# === ЗАПИС ===
+def add_sheet(data):
+    if not os.path.exists(CREDS_S): return
+    try:
+        build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES)).spreadsheets().values().append(
+            spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
+            body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email", ""), data["addr"], data["full"]]]}
+        ).execute()
+    except Exception as e: log.error(f"add_sheet: {e}")
+
+def add_event(data):
+    if not os.path.exists(CREDS_C): return False
+    dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
+    if not asyncio.new_event_loop().run_until_complete(is_slot_free(data["date"], data["time"])):
+        return False
+    try:
+        record_code = f"REC-{dt.strftime('%Y%m%d-%H%M')}"
+        service = build("calendar", "v3", credentials=Credentials.from_service_account_file(CREDS_C, scopes=SCOPES))
+        event = service.events().insert(calendarId=CAL_ID, body={
+            "summary": f"ЕКГ: {data['pib']} ({data['phone']})",
+            "location": data["addr"],
+            "description": f"Email: {data.get('email', '—')}\nР.н.: {data['year']}\nСтать: {data['gender']}\nChat ID: {data['cid']}",
+            "start": {"dateTime": (dt - timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"},
+            "end": {"dateTime": (dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Kiev"}
+        }).execute()
+        with lock:
+            ds = data["date"].strftime("%Y-%m-%d")
+            booked_slots.setdefault(ds, []).append(dt)
+        last_rec.setdefault(data["cid"], {})[event["id"]] = {
+            "event_id": event["id"],
+            "full_dt": data["full"],
+            "record_code": record_code,
+            "pib": data["pib"],
+            "gender": data["gender"],
+            "year": data["year"],
+            "phone": data["phone"],
+            "email": data.get("email", ""),
+            "addr": data["addr"]
+        }
+        return True
+    except Exception as e:
+        log.error(f"add_event: {e}")
+        asyncio.create_task(application.bot.send_message(ADMIN_ID, f"ПОМИЛКА: {e}"))
+        return False
+
+# === НАГАДУВАННЯ ===
+async def check_reminders():
+    now = datetime.now(LOCAL)
+    for day in [now.date(), (now + timedelta(days=1)).date()]:
+        events = await get_events(day)
+        for e in events:
+            try:
+                start_dt = datetime.fromisoformat(e["start"]["dateTime"].replace("Z", "+00:00")).astimezone(LOCAL)
+                mins_left = int((start_dt - now).total_seconds() // 60)
+                eid = e["id"]
+                if mins_left in [30, 10] and (eid, mins_left) not in reminded:
+                    cid_match = re.search(r"Chat ID: (\d+)", e.get("description", ""))
+                    cid = int(cid_match.group(1)) if cid_match else None
+                    msg = f"НАГАДУВАННЯ! ЕКГ через {mins_left} хв\n{start_dt.strftime('%d.%m.%Y %H:%M')}\n{e['summary']}"
+                    if cid: await application.bot.send_message(cid, msg)
+                    await application.bot.send_message(ADMIN_ID, msg)
+                    reminded.add((eid, mins_left))
+            except: continue
+
+async def reminder_loop():
+    while True:
+        await check_reminders()
+        await asyncio.sleep(60)
+
+# === ОБРОБКА ===
+async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global u, show_welcome
+    msg = update.message
+    if not msg: return
+    chat_id = msg.chat_id
+    text = msg.text.strip() if msg.text else ""
+    log.info(f"Update: {chat_id} → {text}")
+
+    if chat_id not in show_welcome:
+        await msg.reply_text("Цей бот для запису на ЕКГ вдома!\nОберіть дію:", reply_markup=main_kb)
+        show_welcome[chat_id] = True
+
+    if text == "Скасувати":
+        u.pop(chat_id, None)
+        await msg.reply_text("Скасовано.", reply_markup=main_kb)
+        return
+
+    if text == "Скасувати запис":
+        if chat_id not in last_rec:
+            await msg.reply_text("Немає записів.", reply_markup=main_kb)
+            return
+        reply = "Ваші записи:\n" + "\n".join(f"{r['record_code']} — {r['full_dt']}" for r in last_rec[chat_id].values())
+        reply += "\nВведіть код для скасування:"
+        await msg.reply_text(reply, reply_markup=cancel_kb)
+        return
+
+    if text.startswith("REC-") and chat_id in last_rec and any(text == r["record_code"] for r in last_rec[chat_id].values()):
+        if cancel_record(chat_id, text):
+            await msg.reply_text(f"Запис {text} скасовано!", reply_markup=main_kb)
+        else:
+            await msg.reply_text("Помилка.", reply_markup=main_kb)
+        return
+
+    if text in ["/start", "Записатися на ЕКГ"]:
+        u[chat_id] = {"step": "pib", "cid": chat_id}
+        await msg.reply_text("ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
+        return
+
+    if chat_id not in u: return
+    data = u[chat_id]
+    step = data["step"]
+
+    steps = {
+        "pib": (v_pib, "gender", "Стать:", gender_kb),
+        "gender": (v_gender, "year", "Рік народження:", cancel_kb),
+        "year": (v_year, "phone", "Телефон:", cancel_kb),
+        "phone": (v_phone, "email", "Email (або Пропустити):", email_kb),
+        "email": (v_email, "addr", "Адреса:", cancel_kb),
+        "addr": (lambda x: x.strip(), "date", "Дата:", date_kb())
+    }
+
+    if step in steps:
+        val = steps[step][0](text)
+        if val is not None or (step == "email" and text == "Пропустити"):
+            data[step] = val if val is not None else ""
+            data["step"] = steps[step][1]
+            await msg.reply_text(steps[step][2], reply_markup=steps[step][3])
+        else:
+            await msg.reply_text("Невірно.", reply_markup=cancel_kb)
+        return
+
+    if step == "date":
+        if text == "Інша дата (ДД.ММ.РРРР)":
+            await msg.reply_text("Введіть дату (наприклад, 17.11.2025):", reply_markup=cancel_kb)
+            return
+        d = v_date(text)
+        if d:
+            data["date"] = d
+            data["step"] = "time"
+            slots = await free_slots_async(d)
+            if not slots:
+                await msg.reply_text("Немає вільного часу.", reply_markup=date_kb())
+                data["step"] = "date"
+            else:
+                await msg.reply_text(f"Вільно {d.strftime('%d.%m.%Y')}:\n" + "\n".join(slots) + "\n\nВиберіть час:", reply_markup=cancel_kb)
+        else:
+            await msg.reply_text("Невірна дата.", reply_markup=cancel_kb)
+        return
+
+    if step == "time":
+        try:
+            t = datetime.strptime(text, "%H:%M").time()
+            if not await is_slot_free(data["date"], t):
+                await msg.reply_text("Цей час вже зайнятий. Оберіть інший.", reply_markup=cancel_kb)
+                return
+            full = f"{data['date'].strftime('%d.%m.%Y')} {text}"
+            conf = f"Запис підтверджено!\nПІБ: {data['pib']}\nЧас: {full}"
+            await msg.reply_text(conf, reply_markup=main_kb)
+            await application.bot.send_message(ADMIN_ID, f"НОВИЙ ЗАПИС:\n{conf}")
+            add_event({**data, "time": t, "full": full})
+            add_sheet({**data, "full": full})
+            u.pop(chat_id, None)
+            show_welcome[chat_id] = True
+        except:
+            await msg.reply_text("Формат: 09:00", reply_markup=cancel_kb)
+
+# === FastAPI ===
+app = FastAPI()
+
+@app.post(WEBHOOK_PATH)
+async def webhook(request: Request):
+    log.info("WEBHOOK: Отримано")
+    update = Update.de_json(await request.json(), application.bot)
+    asyncio.create_task(process_update(update, None))
+    return JSONResponse({"ok": True})
+
+@app.get("/")
+async def root():
+    return {"message": "EKG Bot працює!", "time": datetime.now(LOCAL).isoformat()}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# === ЗАПУСК ===
+async def setup_webhook():
+    port = int(os.getenv("PORT", 10000))
+    hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", f"0.0.0.0:{port}")
+    url = f"https://{hostname}{WEBHOOK_PATH}"
+    log.info(f"Налаштування Webhook: {url}")
+    try:
+        await application.bot.set_webhook(url=url)
+        log.info("Webhook встановлено")
+    except Exception as e:
+        log.error(f"Webhook помилка: {e}")
+
+async def main():
+    await application.initialize()
+    await application.start()
+    await setup_webhook()
+    asyncio.create_task(reminder_loop())
+
+    # Запуск Uvicorn
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+if __name__ == "__main__":
+    asyncio.run(main())
