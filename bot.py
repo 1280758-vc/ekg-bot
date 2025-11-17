@@ -1,35 +1,84 @@
-# 1. Коли користувач натискає "Скасувати запис"
-if text == "Скасувати запис ❌":
-    data = last_rec.get(chat_id, {})
-    if not data:
-        await msg.reply_text("У вас немає активних записів. 📭", reply_markup=main_kb)
-        return
-    
-    reply_text = "Ваші записи:\n\n"
-    for i, (event_id, record) in enumerate(data.items(), 1):
-        reply_text += (
-            f"{i}. <b>ID запису:</b> <code>{record['record_code']}</code>\n"
-            f"   📅 <b>Дата і час:</b> {record['full_dt']}\n\n"
-        )
-    
-    reply_text += "Надішли тільки <b>ID запису</b> (наприклад, <code>REC-20251117-1300</code>), щоб скасувати:"
-    await msg.reply_text(reply_text, reply_markup=cancel_kb, parse_mode="HTML")
-    return
+import os
+import re
+import logging
+import time
+from datetime import datetime, timedelta
+from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
+from dateutil import tz
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from contextlib import asynccontextmanager
+from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
+from telegram.ext import Application, ContextTypes
 
+# ==================== НАЛАШТУВАННЯ ====================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+SHEET_ID = os.getenv("SHEET_ID")
+CAL_ID = os.getenv("CAL_ID")
+CREDS_S = "/etc/secrets/EKG_BOT_KEY"
+CREDS_C = "/etc/secrets/CALENDAR_SERVICE_KEY"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/calendar.events"]
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
-# 2. Коли користувач натискає "Список записів"
-if text == "Список записів 📋":
-    data = last_rec.get(chat_id, {})
-    if not data:
-        await msg.reply_text("У вас немає активних записів. 📭", reply_markup=main_kb)
-        return
-    
-    reply_text = "Ваші записи:\n\n"
-    for i, (event_id, record) in enumerate(data.items(), 1):
-        reply_text += (
-            f"{i}. <b>ID запису:</b> <code>{record['record_code']}</code>\n"
-            f"   📅 <b>Дата і час:</b> {record['full_dt']}\n\n"
-        )
-    
-    await msg.reply_text(reply_text, reply_markup=main_kb, parse_mode="HTML")
-    return
+# ==================== ЛОГІВАННЯ ====================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+log = logging.getLogger(__name__)
+log.info("Бот ініціалізований — початок роботи")
+
+# ==================== КОНСТАНТИ ====================
+LOCAL = tz.gettz('Europe/Kiev')
+u, cache, reminded, last_rec, booked_slots, show_welcome = {}, {}, set(), {}, {}, {}
+executor = ThreadPoolExecutor(max_workers=2)
+lock = threading.Lock()
+
+# ==================== APPLICATION ====================
+application = Application.builder().token(BOT_TOKEN).build()
+
+# ==================== КЛАВІАТУРИ ====================
+main_kb = ReplyKeyboardMarkup([
+    [KeyboardButton("Записатися на ЕКГ"), KeyboardButton("Скасувати запис")],
+    [KeyboardButton("Список записів")]
+], resize_keyboard=True)
+
+cancel_kb = ReplyKeyboardMarkup([[KeyboardButton("Скасувати")]], resize_keyboard=True)
+gender_kb = ReplyKeyboardMarkup([[KeyboardButton("Чоловіча"), KeyboardButton("Жіноча")]], resize_keyboard=True)
+
+def date_kb():
+    today = datetime.now().strftime("%d.%m.%Y – Сьогодні")
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y – Завтра")
+    day_after = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y – Післязавтра")
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(today), KeyboardButton(tomorrow)],
+        [KeyboardButton(day_after), KeyboardButton("Інша дата (ДД.ММ.ЯЯЯЯ)")],
+        [KeyboardButton("Скасувати")]
+    ], resize_keyboard=True)
+
+email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити")]], resize_keyboard=True)
+
+# ==================== ВАЛІДАЦІЯ ====================
+def v_date(x):
+    x = x.strip()
+    if "Сьогодні" in x: return datetime.now().date()
+    if "Завтра" in x: return (datetime.now() + timedelta(days=1)).date()
+    if "Післязавтра" in x: return (datetime.now() + timedelta(days=2)).date()
+    try:
+        if " – " in x: x = x.split(" – ")[0]
+        d = datetime.strptime(x, "%d.%m.%Y").date()
+        return d if d >= datetime.now().date() else None
+    except:
+        return None
+
+# ==================== КАЛЕНДАР ====================
+def get_events_async(d):
+    ds = d.strftime("%Y-%m-%d")
+    if ds in cache and time.time() - cache[ds][1] < 300:
+        return cache[ds][0]
+    if not os.path.exists(CREDS_C):
+        return []
+    try:
+       
