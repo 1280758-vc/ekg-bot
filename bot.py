@@ -60,14 +60,18 @@ def date_kb():
 
 email_kb = ReplyKeyboardMarkup([[KeyboardButton("Пропустити")]], resize_keyboard=True)
 
-# ==================== ВАЛІДАЦІЯ ====================
+# ==================== ВАЛІДАЦІЯ ДАТИ ====================
 def v_date(x):
     x = x.strip()
-    if "Сьогодні" in x: return datetime.now().date()
-    if "Завтра" in x: return (datetime.now() + timedelta(days=1)).date()
-    if "Післязавтра" in x: return (datetime.now() + timedelta(days=2)).date()
+    if "Сьогодні" in x:
+        return datetime.now().date()
+    if "Завтра" in x:
+        return (datetime.now() + timedelta(days=1)).date()
+    if "Післязавтра" in x:
+        return (datetime.now() + timedelta(days=2)).date()
     try:
-        if " – " in x: x = x.split(" – ")[0]
+        if " – " in x:
+            x = x.split(" – ")[0]
         d = datetime.strptime(x, "%d.%m.%Y").date()
         return d if d >= datetime.now().date() else None
     except:
@@ -102,17 +106,21 @@ async def free_60(d, t):
     events = cache.get(d.strftime("%Y-%m-%d"), [{}])[0]
     with lock:
         for b in booked_slots.get(d.strftime("%Y-%m-%d"), []):
-            if abs((dt - b).total_seconds()) < 3600: return False
+            if abs((dt - b).total_seconds()) < 3600:
+                return False
     for e in events:
         try:
             estart = datetime.fromisoformat(e["start"]["dateTime"].replace("Z", "+00:00")).astimezone(LOCAL)
-            if abs((dt - estart).total_seconds()) < 3600: return False
-        except: continue
+            if abs((dt - estart).total_seconds()) < 3600:
+                return False
+        except:
+            continue
     return True
 
 async def free_slots_async(d):
     ds = d.strftime("%Y-%m-%d")
-    if ds in cache: del cache[ds]
+    if ds in cache:
+        del cache[ds]
     slots = []
     current = datetime.combine(d, datetime.strptime("09:00", "%H:%M").time())
     while current.time() <= datetime.strptime("18:00", "%H:%M").time():
@@ -123,13 +131,15 @@ async def free_slots_async(d):
 
 # ==================== СКАСУВАННЯ ====================
 def cancel_record(chat_id, record_code=None):
-    if chat_id not in last_rec: return False
+    if chat_id not in last_rec:
+        return False
     if record_code:
         rec = next((r for r in last_rec[chat_id].values() if r["record_code"] == record_code), None)
-        if not rec: return False
+        if not rec:
+            return False
         event_id = rec["event_id"]
         dt = datetime.strptime(rec["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
-        last_rec[chat_id] = {k:v for k,v in last_rec[chat_id].items() if v.get("record_code") != record_code}
+        last_rec[chat_id] = {k: v for k, v in last_rec[chat_id].items() if v.get("record_code") != record_code}
     else:
         event_id = list(last_rec[chat_id].values())[0]["event_id"]
         dt = datetime.strptime(list(last_rec[chat_id].values())[0]["full_dt"], "%d.%m.%Y %H:%M").replace(tzinfo=LOCAL)
@@ -142,7 +152,8 @@ def cancel_record(chat_id, record_code=None):
             ds = dt.date().strftime("%Y-%m-%d")
             if ds in booked_slots and dt in booked_slots[ds]:
                 booked_slots[ds].remove(dt)
-                if not booked_slots[ds]: del booked_slots[ds]
+                if not booked_slots[ds]:
+                    del booked_slots[ds]
         asyncio.create_task(application.bot.send_message(ADMIN_ID, f"Скасовано: {dt.strftime('%d.%m.%Y %H:%M')}"))
         return True
     except Exception as e:
@@ -151,16 +162,19 @@ def cancel_record(chat_id, record_code=None):
 
 # ==================== ЗАПИС ====================
 def add_sheet(data):
-    if not os.path.exists(CREDS_S): return
+    if not os.path.exists(CREDS_S):
+        return
     try:
         build("sheets", "v4", credentials=Credentials.from_service_account_file(CREDS_S, scopes=SCOPES)).spreadsheets().values().append(
             spreadsheetId=SHEET_ID, range="A:H", valueInputOption="RAW",
             body={"values": [[datetime.now().strftime("%d.%m.%Y %H:%M"), data["pib"], data["gender"], data["year"], data["phone"], data.get("email",""), data["addr"], data["full"]]]}
         ).execute()
-    except Exception as e: log.error(f"add_sheet: {e}")
+    except Exception as e:
+        log.error(f"add_sheet: {e}")
 
 def add_event(data):
-    if not os.path.exists(CREDS_C): return False
+    if not os.path.exists(CREDS_C):
+        return False
     try:
         dt = datetime.combine(data["date"], data["time"]).replace(tzinfo=LOCAL)
         record_code = f"REC-{dt.strftime('%Y%m%d-%H%M')}"
@@ -193,12 +207,15 @@ async def check_reminders():
                 eid = e["id"]
                 if mins in [30, 10] and (eid, mins) not in reminded:
                     desc = e.get("description", "")
-                    cid = int(re.search(r"Chat ID: (\d+)", desc).group(1)) if re.search(r"Chat ID: (\d+)", desc) else None
+                    match = re.search(r"Chat ID: (\d+)", desc)
+                    cid = int(match.group(1)) if match else None
                     msg = f"НАГАДУВАННЯ! ЕКГ через {mins} хв\n{start_dt.strftime('%d.%m.%Y %H:%M')}\n{e['summary']}"
-                    if cid: await application.bot.send_message(cid, msg)
+                    if cid:
+                        await application.bot.send_message(cid, msg)
                     await application.bot.send_message(ADMIN_ID, msg)
                     reminded.add((eid, mins))
-            except: continue
+            except:
+                continue
 
 async def reminder_loop():
     while True:
@@ -209,11 +226,11 @@ async def reminder_loop():
 async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global u, show_welcome
     msg = update.message
-    if not msg: return
+    if not msg:
+        return
     chat_id = msg.chat_id
     text = msg.text.strip() if msg.text else ""
 
-    # Вітання
     if chat_id not in show_welcome:
         await msg.reply_text("Цей бот для запису на ЕКГ вдома!\nОберіть дію:", reply_markup=main_kb)
         show_welcome[chat_id] = True
@@ -264,26 +281,26 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Введіть ПІБ (Прізвище Ім'я По батькові):", reply_markup=cancel_kb)
         return
 
-    if chat_id not in u: return
+    if chat_id not in u:
+        return
 
     data = u[chat_id]
     step = data.get("step")
 
-    # Кроки форми
+    # Форма запису
     if step == "pib":
-        pib = " ".join(text.strip().split())
-        if len(pib.split()) == 3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$", i) for i in pib.split()):
-            data["pib"] = pib
+        parts = text.strip().split()
+        if len(parts) == 3 and all(re.match(r"^[А-ЯЁІЇЄҐ][а-яёіїєґ]+$", p) for p in parts):
+            data["pib"] = " ".join(parts)
             data["step"] = "gender"
             await msg.reply_text("Стать:", reply_markup=gender_kb)
         else:
-            await msg.reply_text("Невірне ПІБ. Введіть правильно.", reply_markup=cancel_kb)
+            await msg.reply_text("Невірне ПІБ. Введіть три слова з великої літери.", reply_markup=cancel_kb)
         return
 
     if step == "gender":
-        g = text.strip()
-        if g in ["Чоловіча", "Жіноча"]:
-            data["gender"] = g
+        if text in ["Чоловіча", "Жіноча"]:
+            data["gender"] = text
             data["step"] = "year"
             await msg.reply_text("Рік народження:", reply_markup=cancel_kb)
         else:
@@ -300,21 +317,22 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "phone":
-        if re.match(r"^(\+380|0)\d{9}$", text.replace(" ", "")):
+        cleaned = text.replace(" ", "")
+        if re.match(r"^(\+380|0)\d{9}$", cleaned):
             data["phone"] = text.strip()
             data["step"] = "email"
             await msg.reply_text("Email (можна пропустити):", reply_markup=email_kb)
         else:
-            await msg.reply_text("Невірний телефон.", reply_markup=cancel_kb)
+            await msg.reply_text("Невірний номер телефону.", reply_markup=cancel_kb)
         return
 
     if step == "email":
-        if text == "Пропустити" or not text:
+        if text == "Пропустити" or text == "":
             data["email"] = ""
         elif re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", text):
             data["email"] = text.strip()
         else:
-            await msg.reply_text("Невірний email або натисніть Пропустити.", reply_markup=email_kb)
+            await msg.reply_text("Невірний email. Натисніть Пропустити або введіть правильний.", reply_markup=email_kb)
             return
         data["step"] = "addr"
         await msg.reply_text("Адреса (де робити ЕКГ):", reply_markup=cancel_kb)
@@ -328,7 +346,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "date":
         if text == "Інша дата (ДД.ММ.ЯЯЯЯ)":
-            await msg.reply_text("Введіть дату ДД.ММ.ЯЯЯЯ:", reply_markup=cancel_kb)
+            await msg.reply_text("Введіть дату у форматі ДД.ММ.ЯЯЯЯ:", reply_markup=cancel_kb)
             return
         d = v_date(text)
         if d:
@@ -339,7 +357,7 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(f"На {d.strftime('%d.%m.%Y')} немає вільного часу.", reply_markup=date_kb())
                 data["step"] = "date"
             else:
-                await msg.reply_text(f"Вільний час {d.strftime('%d.%m.%Y')}:\n" + "\n".join(slots) + "\n\nВведіть час (наприклад 14:00):", reply_markup=cancel_kb)
+                await msg.reply_text(f"Вільно {d.strftime('%d.%m.%Y')}:\n" + "\n".join(slots) + "\n\nВведіть час (наприклад 14:00):", reply_markup=cancel_kb)
         else:
             await msg.reply_text("Невірна дата.", reply_markup=cancel_kb)
         return
@@ -347,7 +365,9 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "time":
         try:
             t = datetime.strptime(text.strip(), "%H:%M").time()
-            if "09:00" <= text.strip() <= "18:00" and await free_60(data["date"], t):
+            if not ("09:00" <= text.strip() <= "18:00"):
+                raise ValueError
+            if await free_60(data["date"], t):
                 full = f"{data['date'].strftime('%d.%m.%Y')} {text.strip()}"
                 conf = f"Запис підтверджено!\n\nПІБ: {data['pib']}\nСтать: {data['gender']}\nР.н.: {data['year']}\nТелефон: {data['phone']}\nEmail: {data.get('email','—')}\nАдреса: {data['addr']}\nДата і час: {full}"
                 await msg.reply_text(conf, reply_markup=main_kb)
@@ -356,9 +376,9 @@ async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_sheet({**data, "full": full})
                 u.pop(chat_id, None)
             else:
-                await msg.reply_text("Час зайнятий або поза діапазоном.", reply_markup=cancel_kb)
+                await msg.reply_text("Цей час зайнятий. Оберіть інший.", reply_markup=cancel_kb)
         except:
-            await msg.reply_text("Введіть час у форматі ЧЧ:ХХ", reply_markup=cancel_kb)
+            await msg.reply_text("Формат: ЧЧ:ХХ (наприклад 14:00)", reply_markup=cancel_kb)
         return
 
 # ==================== FASTAPI ====================
